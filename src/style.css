@@ -1,13 +1,79 @@
+/* 全局主题：明亮、留白、圆角；覆盖 Element Plus 变量 */
+:root {
+  --brand: #5b6cff;
+  --brand-2: #22c3ee;
+  --brand-soft: #eff0ff;
+  --brand-line: #ced3ff;
+  --fg: #1f2433;
+  --fg-soft: #5d6577;
+  --fg-faint: #8f97a8;
+  --line: #e9ecf3;
+  --soft-bg: #f6f8fc;
+  --shadow: 0 1px 2px rgba(25, 35, 70, 0.04), 0 8px 28px rgba(25, 35, 70, 0.06);
+
+  --el-color-primary: #5b6cff;
+  --el-color-primary-light-3: #8c98ff;
+  --el-color-primary-light-5: #adb6ff;
+  --el-color-primary-light-7: #ced3ff;
+  --el-color-primary-light-8: #dee2ff;
+  --el-color-primary-light-9: #eff0ff;
+  --el-color-primary-dark-2: #4956cc;
+  --el-color-success: #17b26a;
+  --el-color-success-light-9: #e8f8f0;
+  --el-color-warning: #f5a524;
+  --el-color-warning-light-9: #fff6e6;
+  --el-color-danger: #f04461;
+  --el-color-danger-light-9: #fff0f2;
+  --el-color-info: #8f97a8;
+  --el-color-info-light-9: #f3f5f9;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-border-color: #e3e7ef;
+  --el-border-color-light: #e9ecf3;
+  --el-border-color-lighter: #eef1f6;
+  --el-fill-color-light: #f6f8fc;
+  --el-fill-color-lighter: #f9fafd;
+  --el-text-color-primary: #1f2433;
+  --el-text-color-regular: #3d4455;
+  --el-font-size-base: 14px;
+}
+
 html, body, #app { margin: 0; height: 100%; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f7fa; color: #303133; }
-.page { padding: 16px 20px; }
-.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif;
+  background: radial-gradient(1200px 400px at 10% -10%, #e9ecff 0%, transparent 60%),
+    radial-gradient(900px 360px at 100% -10%, #e2f8ff 0%, transparent 60%), #f4f6fb;
+  background-attachment: fixed;
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+.page { padding: 22px 28px 40px; max-width: 1560px; margin: 0 auto; box-sizing: border-box; }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 .toolbar .spacer { flex: 1; }
-.mono, code, pre { font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12.5px; }
-pre.code { margin: 0; padding: 10px 12px; background: #fafafa; border: 1px solid #ebeef5; border-radius: 4px; overflow: auto; max-height: 420px; }
-textarea.code-input { width: 100%; box-sizing: border-box; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5; padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: vertical; tab-size: 4; }
-textarea.code-input:focus { outline: none; border-color: #409eff; }
-.muted { color: #909399; }
-.err-list { margin: 6px 0 0; padding-left: 18px; color: #f56c6c; font-size: 12px; }
+.block-title { font-size: 16px; }
+.mono, code, pre { font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; font-size: 12.5px; }
+pre.code { margin: 0; padding: 12px 14px; background: var(--soft-bg); border: 1px solid var(--line); border-radius: 12px; overflow: auto; max-height: 420px; }
+textarea.code-input { width: 100%; box-sizing: border-box; font-family: 'JetBrains Mono', Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55; padding: 10px 12px; border: 1px solid var(--el-border-color); border-radius: 12px; resize: vertical; tab-size: 4; background: var(--soft-bg); }
+textarea.code-input:focus { outline: none; border-color: var(--brand); background: #fff; }
+.muted { color: var(--fg-faint); }
+.err-list { margin: 6px 0 0; padding-left: 18px; color: var(--el-color-danger); font-size: 12px; }
 .section-title { font-weight: 600; margin: 4px 0 8px; }
-.card { background: #fff; border: 1px solid #ebeef5; border-radius: 4px; padding: 12px 14px; }
+.card { background: #fff; border: none; border-radius: 16px; padding: 16px 18px; box-shadow: var(--shadow); }
+.tool-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+/* Element Plus 细节 */
+.el-table { border-radius: 16px; overflow: hidden; box-shadow: var(--shadow); --el-table-header-bg-color: #f8f9fd; --el-table-row-hover-bg-color: #f5f7ff; --el-table-border-color: #eef1f6; }
+.el-table th.el-table__cell { color: var(--fg-soft); font-weight: 600; font-size: 13px; }
+.el-table .el-table { box-shadow: none; border-radius: 12px; }
+.el-table--border::after, .el-table--border::before, .el-table__inner-wrapper::before { background-color: transparent; }
+.el-table--border .el-table__inner-wrapper::after { background-color: transparent; }
+.el-button { border-radius: 10px; font-weight: 500; }
+.el-button--primary:not(.is-link):not(.is-plain) { background: linear-gradient(135deg, #5b6cff, #7b6bff); border: none; box-shadow: 0 4px 12px rgba(91, 108, 255, 0.28); }
+.el-button--primary:not(.is-link):not(.is-plain):hover { background: linear-gradient(135deg, #6a79ff, #8a7bff); }
+.el-tag { border-radius: 99px; }
+.el-dialog { border-radius: 20px; padding: 22px 24px; }
+.el-drawer { border-radius: 20px 0 0 20px; }
+.el-alert { border-radius: 12px; }
+.el-select__wrapper, .el-input__wrapper, .el-date-editor.el-input__wrapper { border-radius: 10px; }
+.el-pagination { --el-pagination-border-radius: 8px; }
+.el-message { border-radius: 12px; }

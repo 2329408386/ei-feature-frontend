@@ -10,16 +10,17 @@ import OperatorForm from '../components/OperatorForm.vue'
 import ReviewDialog from '../components/ReviewDialog.vue'
 import OperatorDrawer from '../components/OperatorDrawer.vue'
 import MetaDialog from '../components/MetaDialog.vue'
-import { Edit } from '@element-plus/icons-vue'
+import { Edit, InfoFilled } from '@element-plus/icons-vue'
 
 const me = DEV_USER_SWITCH ? devUser.name : null
 const mine = (row) => !me || row.created_by === me
 const others = (row) => !me || row.created_by !== me
 
-const filter = reactive({ status: '', tool_type: '', q: '' })
-const toolTypes = ref([])
-async function loadToolTypes() {
-  toolTypes.value = await features.toolTypes()
+const filter = reactive({ status: '', tool: '', q: '' })
+// 机台不手填：特征下算子生效绑定的 recipe，经 GDE 反查到的机台
+const tools = ref([])
+async function loadTools() {
+  tools.value = await features.tools()
 }
 const pager = reactive({ page: 1, page_size: 20, total: 0 })
 const rows = ref([])
@@ -41,7 +42,7 @@ async function load() {
 }
 onMounted(() => {
   load()
-  loadToolTypes()
+  loadTools()
 })
 function search() {
   pager.page = 1
@@ -65,7 +66,6 @@ function editMeta(kind, target) {
 }
 function onMetaSaved() {
   load()
-  loadToolTypes()
 }
 
 function newFeature(base = null) {
@@ -143,8 +143,8 @@ async function retireOp(o) {
     <div class="toolbar">
       <span class="muted" style="font-size: 13px">草稿 → 待评审 → 已发布 → 已下线</span>
       <span class="spacer" />
-      <el-select v-model="filter.tool_type" placeholder="全部机台类型" clearable filterable style="width: 140px" @change="search">
-        <el-option v-for="t in toolTypes" :key="t" :label="t" :value="t" />
+      <el-select v-model="filter.tool" placeholder="全部机台" clearable filterable style="width: 140px" @change="search">
+        <el-option v-for="t in tools" :key="t" :label="t" :value="t" />
       </el-select>
       <el-select v-model="filter.status" placeholder="全部状态" clearable style="width: 120px" @change="search">
         <el-option label="草稿" value="draft" />
@@ -197,12 +197,21 @@ async function retireOp(o) {
       <el-table-column label="特征" min-width="200">
         <template #default="{ row }">
           <b>{{ row.display_name || row.feature_id }}</b>
-          <el-button link size="small" style="margin-left: 4px" title="修改名称 / 机台类型" @click="editMeta('feature', row)"><el-icon><Edit /></el-icon></el-button>
+          <el-button link size="small" style="margin-left: 4px" title="修改名称" @click="editMeta('feature', row)"><el-icon><Edit /></el-icon></el-button>
           <div v-if="row.display_name" class="muted mono" style="font-size: 12px">{{ row.feature_id }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="机台类型" width="100">
-        <template #default="{ row }"><el-tag v-if="row.tool_type" size="small" type="info">{{ row.tool_type }}</el-tag><span v-else class="muted">—</span></template>
+      <el-table-column label="计算的机台" min-width="190">
+        <template #header>
+          计算的机台
+          <el-tooltip content="由该特征各算子生效绑定的 recipe 经 GDE 反查得出，不用手填"><el-icon style="vertical-align: -2px; color: #a8abb2"><InfoFilled /></el-icon></el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <span v-if="row.tools?.length" class="tool-tags">
+            <el-tag v-for="t in row.tools" :key="t" size="small" effect="plain" round :type="t === filter.tool ? 'primary' : 'info'" style="cursor: pointer" @click="filter.tool = t; search()">{{ t }}</el-tag>
+          </span>
+          <span v-else class="muted" style="font-size: 12px">未绑定</span>
+        </template>
       </el-table-column>
       <el-table-column label="版本" prop="version" width="80" />
       <el-table-column label="说明" min-width="220" show-overflow-tooltip>
@@ -236,8 +245,8 @@ async function retireOp(o) {
     <el-pagination v-if="pager.total > pager.page_size" v-model:current-page="pager.page" :page-size="pager.page_size" :total="pager.total"
       layout="total, prev, pager, next" style="margin-top: 12px; justify-content: flex-end" @current-change="load" />
 
-    <FeatureForm v-model="featureForm.open" :base="featureForm.base" :tool-types="toolTypes" @created="onMetaSaved" />
-    <MetaDialog v-model="metaDlg.open" :kind="metaDlg.kind" :target="metaDlg.target" :tool-types="toolTypes" @saved="onMetaSaved" />
+    <FeatureForm v-model="featureForm.open" :base="featureForm.base" @created="onMetaSaved" />
+    <MetaDialog v-model="metaDlg.open" :kind="metaDlg.kind" :target="metaDlg.target" @saved="onMetaSaved" />
     <OperatorForm v-model="opForm.open" :feature-id="opForm.featureId" :existing="opsByFeature[opForm.featureId] || []" :base="opForm.base" @created="load" />
     <ReviewDialog v-model="review.open" :kind="review.kind" :target="review.target" @done="load" />
     <OperatorDrawer v-model="drawer.open" :target="drawer.target" />

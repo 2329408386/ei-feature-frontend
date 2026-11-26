@@ -1,6 +1,7 @@
 // 统一请求封装：带 X-Client: console；错误统一 {code, message, details}，用 ElMessage 提示。
 import { ElMessage } from 'element-plus'
 import { reactive } from 'vue'
+import { OFFLINE } from './offline-flag'
 
 export const DEV_USER_SWITCH = import.meta.env.VITE_DEV_USER_SWITCH === 'true'
 export const devUser = reactive({ name: localStorage.getItem('ei.devUser') || 'alice' })
@@ -41,6 +42,7 @@ function qs(params) {
  *   silent：出错时不弹提示（调用方自己展示，如逐条校验错误）
  */
 export async function request(method, path, { params, body, silent = false, raw = false } = {}) {
+  if (OFFLINE) return offline(method, path, { params, body, silent })
   const headers = { 'X-Client': 'console' }
   if (DEV_USER_SWITCH) headers['X-User'] = devUser.name
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -74,6 +76,19 @@ export async function request(method, path, { params, body, silent = false, raw 
     throw err
   }
   return data
+}
+
+// 离线演示：offline.js 只在离线构建里被加载（内联进单个 HTML）
+async function offline(method, path, { params, body, silent }) {
+  const { offlineRequest } = await import('./offline.js')
+  const clean = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== ''))
+  const r = offlineRequest(method, path, clean, body)
+  if (r && typeof r.status === 'number' && r.body?.code) {
+    const err = new ApiError(r.status, r.body)
+    if (!silent) ElMessage.warning(err.message)
+    throw err
+  }
+  return r
 }
 
 export const get = (path, params, opts) => request('GET', path, { ...opts, params })

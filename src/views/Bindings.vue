@@ -1,11 +1,12 @@
 <script setup>
-// 算子绑定：左侧算子列表 + 右侧编辑（选 recipe → 算子版本、JSON、修订）。
-// 不选机台 / 腔室：审核通过后按 recipe 订阅 GDE，GDE 自动推送该 recipe 在所有机台 / 腔室上的 run_id（含以后新增的腔室）。
-import { computed, onMounted, reactive, ref } from 'vue'
+// 算子绑定：左侧算子列表 + 右侧编辑（fleet + 时间 → 腔室 → recipe → 算子版本、JSON、修订）。
+// fleet、腔室只用来缩小 recipe 候选；绑定里只存 recipe。选好 recipe 后不再反查 / 勾选机台腔室：
+// 审核通过后按 recipe 订阅 GDE，GDE 自动推送该 recipe 在所有机台 / 腔室上的 run_id（含以后新增的腔室）。
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bindings, features, gde, operators } from '../api'
 import { DEV_USER_SWITCH, devUser } from '../api/http'
-import { fmtTime, labelOf, normalizeSpec } from '../util'
+import { daysAgo, fmtTime, labelOf, normalizeSpec, today } from '../util'
 import StatusTag from '../components/StatusTag.vue'
 import ErrorList from '../components/ErrorList.vue'
 import JsonDiff from '../components/JsonDiff.vue'
@@ -79,7 +80,7 @@ const versions = ref([]) // 该算子已发布的版本（降序）
 const base = ref(null) // 编辑的基准修订（生效中的）
 const ed = reactive({
   version: null,
-  recipes: [], // [{recipe, chambers: [{tool, chamber}], loading, error, open}]
+  recipes: [], // [recipe]
 })
 const errors = ref([])
 const submitting = ref(false)
@@ -101,11 +102,69 @@ async function select(it) {
 function loadSpec(spec) {
   errors.value = []
   ed.version = versions.value.includes(spec?.version) ? spec.version : versions.value[0] ?? spec?.version ?? null
-  ed.recipes = []
-  for (const r of spec?.recipes || []) addRecipe(r)
+  ed.recipes = [...(spec?.recipes || [])]
 }
 
-// ---- ① recipe 模糊选择（防抖 300 ms）
+// ---- ① fleet + 时间范围 → 腔室（默认全选）→ recipe 候选
+const scope = reactive({
+  fleets: [],
+  fleet: '',
+  range: [daysAgo(30), today()],
+  chambers: [], // [{tool, chamber}]
+  checked: [], // [chamber]
+  recipes: [], // 勾选腔室在时间范围内跑过的 recipe（并集）
+  loading: '',
+  error: '',
+})
+const recipeCache = new Map() // `${chamber}|${start}|${end}` -> [recipe]
+onMounted(async () => (scope.fleets = await gde.fleets()))
+async function onFleet() {
+  Object.assign(scope, { chambers: [], checked: [], recipes: [], error: '' })
+  if (!scope.fleet) return
+  scope.loading = 'chamber'
+  try {
+    scope.chambers = await gde.fleetChambers(scope.fleet, scope.range[0], scope.range[1])
+    scope.checked = scope.chambers.map((c) => c.chamber)
+  } catch (e) {
+    scope.error = `${e.code}：${e.message}`
+  } finally {
+    scope.loading = ''
+  }
+}
+function toggleChamber(c) {
+  const i = scope.checked.indexOf(c)
+  if (i >= 0) scope.checked.splice(i, 1)
+  else scope.checked.push(c)
+}
+function toggleTool(list) {
+  const all = list.every((c) => scope.checked.includes(c))
+  scope.checked = all ? scope.checked.filter((c) => !list.includes(c)) : [...new Set([...scope.checked, ...list])]
+}
+let seq = 0
+watch(
+  () => [scope.checked.slice(), scope.range?.[0], scope.range?.[1]],
+  async () => {
+    const my = ++seq
+    if (!scope.checked.length) return (scope.recipes = [])
+    scope.loading = 'recipe'
+    try {
+      const [start, end] = scope.range
+      const lists = await Promise.all(scope.checked.map(async (c) => {
+        const k = `${c}|${start}|${end}`
+        if (!recipeCache.has(k)) recipeCache.set(k, await gde.chamberRecipes(c, start, end))
+        return recipeCache.get(k)
+      }))
+      if (my === seq) scope.recipes = [...new Set(lists.flat())].sort()
+    } catch (e) {
+      scope.error = `${e.code}：${e.message}`
+    } finally {
+      if (my === seq) scope.loading = ''
+    }
+  },
+)
+const chamberGroups = computed(() => groupByTool(scope.chambers))
+
+// 没选 fleet 时，recipe 直接在 GDE 全部 recipe 中模糊搜索（防抖 300 ms）
 const recipeOptions = ref([])
 const recipeLoading = ref(false)
 const recipePick = ref('')
@@ -121,33 +180,21 @@ function searchRecipes(q) {
     }
   }, 300)
 }
+const candidates = computed(() => (scope.fleet ? scope.recipes : recipeOptions.value))
 function addRecipe(name) {
   recipePick.value = ''
-  if (!name || ed.recipes.some((r) => r.recipe === name)) return
-  const r = reactive({ recipe: name, chambers: [], loading: true, error: '', open: false })
-  ed.recipes.push(r)
-  loadChambers(r)
+  if (!name || ed.recipes.includes(name)) return
+  ed.recipes.push(name)
+}
+function addAll() {
+  for (const r of scope.recipes) addRecipe(r)
 }
 function removeRecipe(i) {
   ed.recipes.splice(i, 1)
   errors.value = []
 }
-/** 只读展示：GDE 当前已知跑过该 recipe 的机台 / 腔室（以后新增的腔室会自动推送） */
-async function loadChambers(r) {
-  r.loading = true
-  r.error = ''
-  try {
-    r.chambers = await gde.recipeChambers(r.recipe)
-  } catch (e) {
-    r.error = `${e.code}：${e.message}`
-  } finally {
-    r.loading = false
-  }
-}
 const recipeErrors = (i) => errors.value.filter((e) => e.path === `recipes[${i}]`)
 const otherErrors = computed(() => errors.value.filter((e) => !e.path || !/^recipes\[\d+\]$/.test(e.path)))
-const totalChambers = computed(() => new Set(ed.recipes.flatMap((r) => r.chambers.map((c) => `${c.tool}|${c.chamber}`))).size)
-const toolCount = (r) => new Set(r.chambers.map((c) => c.tool)).size
 
 // ---- ② 生成的绑定 JSON
 const generated = computed(() => {
@@ -156,7 +203,7 @@ const generated = computed(() => {
     feature_id: selected.value.feature_id,
     operator: selected.value.operator,
     version: ed.version,
-    recipes: ed.recipes.map((r) => r.recipe),
+    recipes: [...ed.recipes],
   }
 })
 const baseSpec = computed(() => base.value?.spec || null)
@@ -263,7 +310,7 @@ async function doExport() {
 <template>
   <div class="page bindings">
     <div class="toolbar">
-      <span class="muted" style="font-size: 13px">只绑 recipe：审核通过后按 recipe 订阅 GDE，GDE 自动推送该 recipe 下所有机台 / 腔室的 run_id，新增腔室也会自动计算</span>
+      <span class="muted" style="font-size: 13px">按 fleet → 腔室 → recipe 选择；只绑 recipe，审核通过后 GDE 自动推送该 recipe 下所有机台 / 腔室的 run_id，新增腔室也会自动计算</span>
       <span class="spacer" />
       <el-button @click="importOpen = true">导入</el-button>
       <el-button @click="doExport">导出</el-button>
@@ -333,41 +380,49 @@ async function doExport() {
 
           <!-- ① -->
           <div class="card step">
-            <div class="step-title"><span class="no">1</span>选 recipe <span class="muted">输入关键字自动过滤，点击候选项加入；不需要选机台 / 腔室</span></div>
-            <el-select v-model="recipePick" filterable remote :remote-method="searchRecipes" :loading="recipeLoading" placeholder="搜索 recipe" style="width: 320px"
-              @change="addRecipe" @focus="searchRecipes('')">
-              <el-option v-for="r in recipeOptions" :key="r" :label="r" :value="r" :disabled="ed.recipes.some((x) => x.recipe === r)" />
-            </el-select>
-            <span v-if="ed.recipes.length" class="muted" style="font-size: 12px; margin-left: 10px">
-              已选 {{ ed.recipes.length }} 个 recipe，GDE 当前覆盖 {{ totalChambers }} 个腔室
-            </span>
-
-            <div v-if="!ed.recipes.length" class="muted" style="font-size: 13px; margin-top: 10px">还没有绑定 recipe</div>
-            <div v-for="(r, i) in ed.recipes" :key="r.recipe" class="recipe-card" :class="{ bad: recipeErrors(i).length || r.error }">
-              <div style="display: flex; align-items: center; gap: 8px">
-                <b class="mono">{{ r.recipe }}</b>
-                <span v-if="r.loading" class="muted" style="font-size: 12px">查询腔室…</span>
-                <el-button v-else-if="!r.error" link size="small" @click="r.open = !r.open">
-                  GDE 当前有 {{ toolCount(r) }} 台机台、{{ r.chambers.length }} 个腔室跑过 {{ r.open ? '▲' : '▼' }}
-                </el-button>
-                <span style="flex: 1" />
-                <el-button link type="danger" size="small" @click="removeRecipe(i)">移除</el-button>
-              </div>
-              <div v-if="r.error" class="err-list" style="list-style: none; padding: 0">{{ r.error }}</div>
-              <div v-show="r.open" class="chambers">
-                <div v-for="[tool, list] in groupByTool(r.chambers)" :key="tool" class="tool-row">
-                  <b style="margin-right: 10px">{{ tool }}</b>
-                  <el-tag v-for="c in list" :key="c" size="small" type="info" style="margin: 2px 6px 2px 0">{{ c }}</el-tag>
-                </div>
-                <div class="muted" style="font-size: 12px">仅供参考：以后跑这个 recipe 的新腔室也会自动推送计算</div>
-              </div>
-              <ErrorList :errors="recipeErrors(i)" />
+            <div class="step-title"><span class="no">1</span>选 fleet、时间范围和腔室 <span class="muted">只用来缩小 recipe 候选范围，不写进绑定</span></div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+              <el-select v-model="scope.fleet" placeholder="选择 fleet" clearable style="width: 180px" @change="onFleet">
+                <el-option v-for="f in scope.fleets" :key="f" :label="f" :value="f" />
+              </el-select>
+              <el-date-picker v-model="scope.range" type="daterange" value-format="YYYY-MM-DD" :clearable="false" style="width: 260px" @change="onFleet" />
+              <span v-if="scope.fleet && scope.chambers.length" class="muted" style="font-size: 12px">已勾选 {{ scope.checked.length }} / {{ scope.chambers.length }} 个腔室</span>
             </div>
+            <div v-if="scope.error" class="err-list" style="list-style: none; padding: 0">{{ scope.error }}</div>
+            <div v-if="scope.fleet" v-loading="scope.loading === 'chamber'" class="chambers">
+              <div v-if="!scope.chambers.length && scope.loading !== 'chamber'" class="muted" style="font-size: 12px">该 fleet 在这段时间内没有执行</div>
+              <div v-for="[tool, list] in chamberGroups" :key="tool" class="tool-row">
+                <el-checkbox :model-value="list.every((c) => scope.checked.includes(c))" :indeterminate="list.some((c) => scope.checked.includes(c)) && !list.every((c) => scope.checked.includes(c))"
+                  style="margin-right: 10px; font-weight: 600" @change="toggleTool(list)">{{ tool }}</el-checkbox>
+                <span v-for="c in list" :key="c" class="chip" :class="{ on: scope.checked.includes(c) }" @click="toggleChamber(c)">{{ c }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card step">
+            <div class="step-title"><span class="no">2</span>选 recipe
+              <span class="muted">{{ scope.fleet ? `候选为勾选腔室跑过的 recipe（${scope.recipes.length} 个）` : '未选 fleet 时在全部 recipe 中搜索' }}；GDE 会自动推送 recipe 关联的所有机台与腔室</span>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center">
+              <el-select v-model="recipePick" filterable :remote="!scope.fleet" :remote-method="searchRecipes" :loading="recipeLoading || scope.loading === 'recipe'"
+                placeholder="输入关键字过滤，点击加入" style="width: 320px" @change="addRecipe" @focus="!scope.fleet && searchRecipes('')">
+                <el-option v-for="r in candidates" :key="r" :label="r" :value="r" :disabled="ed.recipes.includes(r)" />
+              </el-select>
+              <el-button v-if="scope.fleet && scope.recipes.length" plain @click="addAll">全部加入</el-button>
+            </div>
+            <div class="recipe-chips">
+              <span v-if="!ed.recipes.length" class="muted" style="font-size: 13px">还没有绑定 recipe</span>
+              <span v-for="(r, i) in ed.recipes" :key="r" class="recipe-chip" :class="{ bad: recipeErrors(i).length }">
+                <span class="mono">{{ r }}</span>
+                <span class="x" title="移除" @click="removeRecipe(i)">×</span>
+              </span>
+            </div>
+            <template v-for="(r, i) in ed.recipes" :key="r + '-err'"><ErrorList v-if="recipeErrors(i).length" :errors="recipeErrors(i)" /></template>
           </div>
 
           <!-- ② -->
           <div class="card step">
-            <div class="step-title"><span class="no">2</span>算子版本与绑定 JSON</div>
+            <div class="step-title"><span class="no">3</span>算子版本与绑定 JSON</div>
             <div style="display: flex; gap: 8px; align-items: center">
               <span>算子版本</span>
               <el-select v-model="ed.version" style="width: 140px" placeholder="无已发布版本">
@@ -438,15 +493,20 @@ async function doExport() {
 .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
 .op-list { max-height: calc(100vh - 200px); overflow: auto; min-height: 120px; }
 .group { font-size: 12px; color: #909399; padding: 8px 6px 4px; }
-.op-item { padding: 8px 10px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
-.op-item:hover { background: #f5f7fa; }
-.op-item.on { background: #ecf5ff; border-color: #b3d8ff; }
+.op-item { padding: 9px 12px; border-radius: 12px; margin-bottom: 2px; cursor: pointer; border: 1px solid transparent; }
+.op-item:hover { background: var(--soft-bg); }
+.op-item.on { background: var(--brand-soft); border-color: var(--brand-line); }
 .right { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .step-title { font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .step-title .muted { font-weight: normal; font-size: 12px; }
-.no { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; background: #409eff; color: #fff; font-size: 12px; align-items: center; justify-content: center; }
+.no { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg, #5b6cff, #22c3ee); color: #fff; font-size: 12px; align-items: center; justify-content: center; }
 .tool-row { display: flex; align-items: center; flex-wrap: wrap; padding: 2px 0; }
-.recipe-card { border: 1px solid #ebeef5; border-radius: 4px; padding: 8px 12px; margin-top: 8px; }
-.recipe-card.bad { border-color: #f56c6c; }
-.chambers { background: #fafafa; border-radius: 4px; padding: 6px 10px; margin-top: 6px; }
+.chambers { background: var(--soft-bg); border-radius: 12px; padding: 8px 12px; margin-top: 10px; min-height: 30px; }
+.chip { display: inline-block; padding: 2px 10px; margin: 3px 6px 3px 0; border-radius: 99px; font-size: 12px; cursor: pointer; border: 1px solid var(--line); color: var(--fg-soft); background: #fff; user-select: none; }
+.chip.on { background: var(--brand-soft); border-color: var(--brand-line); color: var(--brand); }
+.recipe-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.recipe-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 12px; border-radius: 99px; background: var(--brand-soft); color: var(--brand); font-size: 13px; }
+.recipe-chip.bad { background: #fff0f0; color: #e5484d; }
+.recipe-chip .x { width: 18px; height: 18px; line-height: 17px; text-align: center; border-radius: 50%; cursor: pointer; }
+.recipe-chip .x:hover { background: #fff; }
 </style>

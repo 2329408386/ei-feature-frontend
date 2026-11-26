@@ -10,8 +10,9 @@ const bpath = (fid, op) => `/bindings/${enc(fid)}/${enc(op)}`
 
 export const features = {
   list: (params) => get('/features', params),
-  toolTypes: () => get('/features/tool-types'),
-  // 修改显示名称 / 机台类型（只改传入的字段）；feature_id 不变，不需要评审
+  // 所有特征关联的机台（生效绑定的 recipe 经 GDE 反查），供筛选
+  tools: () => get('/features/tools'),
+  // 修改显示名称；feature_id 不变，不需要评审
   updateMeta: (id, body) => patch(`/features/${enc(id)}`, body),
   detail: (id, v) => get(fpath(id, v)),
   create: (spec, opts) => post('/features', spec, opts),
@@ -55,6 +56,8 @@ export const bindings = {
 
 export const schedules = {
   list: (params) => get('/schedules', params),
+  // 特征 → 算子 → recipe → 机台 / 腔室
+  tree: (params) => get('/schedules/tree', params),
   pause: (recipe) => post(`/schedules/${enc(recipe)}/pause`),
   resume: (recipe) => post(`/schedules/${enc(recipe)}/resume`),
 }

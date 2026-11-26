@@ -132,18 +132,18 @@ function option() {
       formatter: (p) => {
         const r = rows.value[p.data.idx]
         if (!r) return ''
-        const v = r.value === null ? `<b style="color:#e6a23c">空值 ${r.reason}</b>` : `<b>${fmtNum(r.value, 4)}</b> ${unit.value}`
+        const v = r.value === null ? `<b style="color:#f5a524">空值 ${r.reason}</b>` : `<b>${fmtNum(r.value, 4)}</b> ${unit.value}`
         return `${v}<br/>${r.run_id}<br/>${r.tool} / ${r.chamber} · ${r.recipe}<br/>${fmtTime(r.run_end_at)}`
       },
     },
     xAxis: { type: 'time' },
-    yAxis: { type: 'value', scale: true, name: unit.value, min: (v) => Math.min(v.min, floor) },
+    yAxis: { type: 'value', scale: true, name: unit.value, min: (v) => Math.min(v.min, floor), axisLabel: { formatter: (v) => fmtNum(v, 2) } },
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 10 }],
     series: [
-      { name: '_line', type: 'line', data: line, showSymbol: false, lineStyle: { width: 1, color: '#a0cfff' }, silent: true, tooltip: { show: false } },
-      { name: '正常值', type: 'scatter', data: normal, symbolSize: 7, itemStyle: { color: '#409eff' } },
-      { name: '重算后的值', type: 'scatter', data: rerun, symbolSize: 9, symbol: 'diamond', itemStyle: { color: '#9254de' } },
-      { name: '空值', type: 'scatter', data: nulls, symbolSize: 9, symbol: 'triangle', itemStyle: { color: '#e6a23c' } },
+      { name: '_line', type: 'line', data: line, showSymbol: false, lineStyle: { width: 2, color: '#c9cfff' }, silent: true, tooltip: { show: false } },
+      { name: '正常值', type: 'scatter', data: normal, symbolSize: 7, itemStyle: { color: '#5b6cff' } },
+      { name: '重算后的值', type: 'scatter', data: rerun, symbolSize: 9, symbol: 'diamond', itemStyle: { color: '#a855f7' } },
+      { name: '空值', type: 'scatter', data: nulls, symbolSize: 9, symbol: 'triangle', itemStyle: { color: '#f5a524' } },
     ],
   }
 }
@@ -225,11 +225,11 @@ function showNullsOf(reason) {
           <b>{{ f.operator || '请选择算子' }}</b>
           <span>共 {{ rows.length }} 个执行</span>
           <span>值 {{ okRows.length }}</span>
-          <span style="color: #e6a23c">空值 {{ nullRows.length }}</span>
+          <span style="color: #f5a524">空值 {{ nullRows.length }}</span>
           <template v-if="stats">
             <span class="muted">均值 {{ fmtNum(stats.mean) }} · 标准差 {{ fmtNum(stats.std) }} · 范围 {{ fmtNum(stats.min) }} ~ {{ fmtNum(stats.max) }} {{ unit }}</span>
           </template>
-          <span v-if="truncated" style="color: #f56c6c">点数过多，只显示前 5000 个，请缩小范围</span>
+          <span v-if="truncated" style="color: #f04461">点数过多，只显示前 5000 个，请缩小范围</span>
         </div>
         <div v-loading="loading" style="position: relative">
           <div ref="chartEl" style="height: 400px; margin-top: 6px" />
@@ -280,7 +280,7 @@ function showNullsOf(reason) {
             <div style="display: flex; justify-content: space-between; font-size: 13px">
               <span class="mono">{{ s.reason }}</span><span>{{ s.n }}（{{ s.pct }}%）</span>
             </div>
-            <el-progress :percentage="s.pct" :show-text="false" :stroke-width="6" color="#e6a23c" />
+            <el-progress :percentage="s.pct" :show-text="false" :stroke-width="6" color="#f5a524" />
           </div>
         </div>
       </div>

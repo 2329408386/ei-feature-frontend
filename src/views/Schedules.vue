@@ -1,27 +1,59 @@
 <script setup>
-// 调度：以 recipe 为键——一个 recipe 一个 GDE 订阅，下面挂多个机台 / 腔室（GDE 反查）和多个算子；
+// 调度：树形展示 特征 → 算子 → recipe → 机台 / 腔室。
+// 订阅按 recipe（GDE 推送它在所有机台 / 腔室上的执行，含新腔室），暂停 / 恢复、补算 / 重算都在 recipe 这一层；
 // 计算批次表；补算 / 重算按 recipe 勾选算子（覆盖该 recipe 下全部腔室）
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { batches, schedules } from '../api'
-import { BATCH_MODE, daysAgo, fmtTime, today } from '../util'
+import { batches, features, schedules } from '../api'
+import { BATCH_MODE, daysAgo, fmtTime, labelOf, today } from '../util'
 import StatusTag from '../components/StatusTag.vue'
 import ErrorList from '../components/ErrorList.vue'
 
-// ======================================================== recipe 订阅
-const sf = reactive({ recipe: '', tool: '', chamber: '' })
-const subs = ref([])
+// ======================================================== 特征 → 算子 → recipe → 机台 / 腔室
+const sf = reactive({ feature_id: '', recipe: '', tool: '', chamber: '' })
+const tree = ref([])
+const featureList = ref([])
 const subLoading = ref(false)
 async function loadSubs() {
   subLoading.value = true
   try {
-    subs.value = await schedules.list({ ...sf })
+    tree.value = await schedules.tree({ ...sf })
   } finally {
     subLoading.value = false
   }
 }
+const uniq = (a) => [...new Set(a)]
+/** 转成 el-table 树形数据，每层带 kind */
+const treeRows = computed(() =>
+  tree.value.map((f) => {
+    const recipes = uniq(f.operators.flatMap((o) => o.recipes.map((r) => r.recipe)))
+    const tools = uniq(f.operators.flatMap((o) => o.recipes.flatMap((r) => (r.chambers || []).map((c) => c.tool))))
+    return {
+      key: `f:${f.feature_id}`, kind: 'feature', feature_id: f.feature_id, name: f.name, recipes, tools, opCount: f.operators.length,
+      children: f.operators.map((o) => ({
+        key: `o:${o.ref}`, kind: 'operator', ...o, feature_id: f.feature_id,
+        children: o.recipes.map((r) => ({
+          key: `r:${o.ref}|${r.recipe}`, kind: 'recipe', ...r, ref: o.ref,
+          children: (r.chambers || []).map((c) => ({ key: `c:${o.ref}|${r.recipe}|${c.tool}|${c.chamber}`, kind: 'chamber', ...c, recipe: r.recipe })),
+        })),
+      })),
+    }
+  }),
+)
+// recipe -> 绑定了它的算子引用（补算 / 重算的候选）
+const opsByRecipe = computed(() => {
+  const m = {}
+  for (const f of tree.value) for (const o of f.operators) for (const r of o.recipes) (m[r.recipe] ||= []).push(o.ref)
+  return m
+})
+const allKeys = (rows, depth) => rows.flatMap((r) => (depth > 0 && r.children ? [r.key, ...allKeys(r.children, depth - 1)] : []))
+const expanded = ref([])
+function expandTo(depth) {
+  expanded.value = allKeys(treeRows.value, depth)
+}
 async function pause(s) {
-  await ElMessageBox.confirm(`暂停 recipe ${s.recipe} 的计算？会经 SDK 暂停 GDE 订阅（该 recipe 下全部腔室），恢复后继续推送。`, '暂停', { type: 'warning' })
+  const ops = opsByRecipe.value[s.recipe] || []
+  await ElMessageBox.confirm(`暂停 recipe ${s.recipe} 的计算？会经 SDK 暂停 GDE 订阅：该 recipe 下全部腔室、绑定它的 ${ops.length} 个算子都会暂停，恢复后继续推送。`, '暂停', { type: 'warning' })
   await schedules.pause(s.recipe)
   ElMessage.success('已暂停')
   loadSubs()
@@ -31,12 +63,6 @@ async function resume(s) {
   ElMessage.success('已恢复')
   loadSubs()
 }
-function groupByTool(list) {
-  const g = {}
-  for (const c of list || []) (g[c.tool] ||= []).push(c)
-  return Object.entries(g).sort(([a], [b]) => a.localeCompare(b))
-}
-const toolCount = (row) => new Set((row.chambers || []).map((c) => c.tool)).size
 
 // ======================================================== 批次
 const bf = reactive({ recipe: '', mode: '', status: '' })
@@ -63,12 +89,16 @@ async function cancel(b) {
   ElMessage.success('已取消')
   loadBatches()
 }
-const recipes = computed(() => subs.value.map((s) => s.recipe))
+const recipes = computed(() => Object.keys(opsByRecipe.value).sort())
 
 // 有排队或进行中的批次时每 5 秒刷新
 let timer = null
-onMounted(() => {
+onMounted(async () => {
   loadSubs()
+  const fs = await features.list({ page_size: 200 })
+  const seen = new Map()
+  for (const f of fs.items) if (!seen.has(f.feature_id)) seen.set(f.feature_id, f)
+  featureList.value = [...seen.values()].sort((a, b) => a.feature_id.localeCompare(b.feature_id))
   loadBatches()
   timer = setInterval(() => {
     if (rows.value.some((b) => b.status === 'queued' || b.status === 'running')) loadBatches(true)
@@ -85,8 +115,9 @@ function showBatch(b) {
 // ======================================================== 补算 / 重算
 const dlg = reactive({ open: false, recipe: '', chambers: null, mode: 'fill', ops: [], checked: [], range: [daysAgo(7), today()], reason: '', errors: [], busy: false })
 function openBatch(s, mode) {
+  const ops = opsByRecipe.value[s.recipe] || []
   Object.assign(dlg, {
-    open: true, recipe: s.recipe, chambers: s.chambers, mode, ops: s.operators, checked: [...s.operators],
+    open: true, recipe: s.recipe, chambers: s.chambers, mode, ops, checked: [s.ref], // 默认只勾所在算子
     range: [daysAgo(7), today()], reason: '', errors: [],
   })
 }
@@ -118,77 +149,83 @@ const pct = (b) => (b.run_total ? Math.round(((b.value_ok + b.value_null) / b.ru
 <template>
   <div class="page">
     <div class="toolbar">
-      <b>recipe 订阅</b>
-      <span class="muted" style="font-size: 12px">每个 recipe 一个 GDE 订阅，GDE 推送它在所有机台 / 腔室上的执行（含新腔室）；审核通过后自动同步，失败由后台每分钟重试</span>
+      <b class="block-title">计算调度</b>
+      <span class="muted" style="font-size: 12px">特征 → 算子 → recipe → 机台 / 腔室；订阅按 recipe，GDE 推送它在所有机台 / 腔室上的执行（含新腔室）</span>
       <span class="spacer" />
-      <el-input v-model="sf.recipe" placeholder="recipe" clearable size="small" style="width: 140px" @change="loadSubs" />
-      <el-input v-model="sf.tool" placeholder="机台" clearable size="small" style="width: 110px" @change="loadSubs" />
-      <el-input v-model="sf.chamber" placeholder="腔室" clearable size="small" style="width: 110px" @change="loadSubs" />
-      <el-button size="small" @click="loadSubs">刷新</el-button>
+      <el-select v-model="sf.feature_id" placeholder="特征" clearable filterable style="width: 180px" @change="loadSubs">
+        <el-option v-for="f in featureList" :key="f.feature_id" :label="labelOf(f.feature_id, f.display_name)" :value="f.feature_id" />
+      </el-select>
+      <el-input v-model="sf.recipe" placeholder="recipe" clearable style="width: 130px" @change="loadSubs" />
+      <el-input v-model="sf.tool" placeholder="机台" clearable style="width: 110px" @change="loadSubs" />
+      <el-input v-model="sf.chamber" placeholder="腔室" clearable style="width: 110px" @change="loadSubs" />
+      <el-button-group>
+        <el-button @click="expandTo(0)">收起</el-button>
+        <el-button @click="expandTo(2)">展开到 recipe</el-button>
+        <el-button @click="expandTo(3)">全部展开</el-button>
+      </el-button-group>
+      <el-button @click="loadSubs">刷新</el-button>
     </div>
-    <el-table v-loading="subLoading" :data="subs" border row-key="recipe" empty-text="还没有 recipe 订阅：先在「算子绑定」页绑定并审核通过">
-      <el-table-column type="expand">
+    <el-table v-loading="subLoading" :data="treeRows" row-key="key" :expand-row-keys="expanded" :row-class-name="({ row }) => 'lv-' + row.kind"
+      empty-text="还没有计算调度：先在「算子绑定」页绑定 recipe 并审核通过" class="sched-tree">
+      <el-table-column label="特征 / 算子 / recipe / 机台腔室" min-width="320">
         <template #default="{ row }">
-          <div class="expand">
-            <div>
-              <div class="section-title">机台 / 腔室 <span class="muted" style="font-weight: normal; font-size: 12px">GDE 反查跑过该 recipe 的；新腔室会自动出现</span></div>
-              <div v-if="row.chambers === null" class="muted" style="font-size: 13px">GDE 暂时不可用，查不到腔室</div>
-              <el-table v-else :data="row.chambers" size="small" border empty-text="GDE 没有返回腔室">
-                <el-table-column label="机台" prop="tool" width="120" />
-                <el-table-column label="腔室" prop="chamber" width="120" />
-                <el-table-column label="已处理到"><template #default="{ row: c }">{{ fmtTime(c.progress) }}</template></el-table-column>
-              </el-table>
-            </div>
-            <div>
-              <div class="section-title">算子</div>
-              <div v-for="o in row.operators" :key="o" class="mono" style="font-size: 12px; padding: 2px 0">{{ o }}</div>
-              <div v-if="!row.operators.length" class="muted" style="font-size: 13px">没有生效绑定（待取消订阅）</div>
-            </div>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="recipe" min-width="140"><template #default="{ row }"><b class="mono">{{ row.recipe }}</b></template></el-table-column>
-      <el-table-column label="机台 / 腔室" min-width="240">
-        <template #default="{ row }">
-          <template v-if="row.chambers">
-            <span class="muted" style="font-size: 12px">{{ toolCount(row) }} 台 · {{ row.chambers.length }} 腔：</span>
-            <span v-for="[tool, list] in groupByTool(row.chambers)" :key="tool" style="margin-right: 10px; font-size: 13px">
-              {{ tool }}（{{ list.map((c) => c.chamber).join('、') }}）
-            </span>
+          <template v-if="row.kind === 'feature'">
+            <span class="lv-badge f">特征</span><b>{{ row.name || row.feature_id }}</b>
+            <span v-if="row.name" class="muted mono id">{{ row.feature_id }}</span>
           </template>
-          <span v-else class="muted">—</span>
+          <template v-else-if="row.kind === 'operator'">
+            <span class="lv-badge o">算子</span><b>{{ row.name || row.operator }}</b>
+            <span class="muted mono id">{{ row.operator }}@{{ row.version }}</span>
+          </template>
+          <template v-else-if="row.kind === 'recipe'">
+            <span class="lv-badge r">recipe</span><b class="mono">{{ row.recipe }}</b>
+          </template>
+          <template v-else>
+            <span class="lv-badge c">腔室</span><span class="mono">{{ row.tool }} / {{ row.chamber }}</span>
+          </template>
         </template>
       </el-table-column>
-      <el-table-column label="算子" min-width="260">
+      <el-table-column label="概况" min-width="230">
         <template #default="{ row }">
-          <div v-for="o in row.operators.slice(0, 3)" :key="o" class="mono" style="font-size: 12px; line-height: 18px">{{ o }}</div>
-          <span v-if="row.operators.length > 3" class="muted" style="font-size: 12px">… 共 {{ row.operators.length }} 个，展开查看</span>
-          <span v-if="!row.operators.length" class="muted">（无，待取消订阅）</span>
+          <span v-if="row.kind === 'feature'" class="muted">{{ row.opCount }} 个算子 · {{ row.recipes.length }} 个 recipe · {{ row.tools.length }} 台机台</span>
+          <span v-else-if="row.kind === 'operator'" class="muted">{{ row.recipes.length }} 个 recipe</span>
+          <template v-else-if="row.kind === 'recipe'">
+            <span v-if="row.chambers" class="muted">{{ uniq(row.chambers.map((c) => c.tool)).length }} 台机台 · {{ row.chambers.length }} 个腔室</span>
+            <span v-else class="muted">GDE 暂时查不到腔室</span>
+          </template>
         </template>
       </el-table-column>
-      <el-table-column label="GDE 订阅" width="120"><template #default="{ row }"><span class="mono">{{ row.gde_sub_id || '—' }}</span></template></el-table-column>
-      <el-table-column label="同步" width="130">
+      <el-table-column label="GDE 订阅" width="130">
+        <template #default="{ row }"><span v-if="row.kind === 'recipe'" class="mono">{{ row.gde_sub_id || '—' }}</span></template>
+      </el-table-column>
+      <el-table-column label="同步" width="110">
         <template #default="{ row }">
-          <el-tag v-if="row.synced" type="success" size="small">已同步</el-tag>
-          <el-tooltip v-else :content="row.last_error || '等待后台同步'">
-            <el-tag type="danger" size="small">未同步{{ row.last_error ? '（有错误）' : '' }}</el-tag>
-          </el-tooltip>
+          <template v-if="row.kind === 'recipe'">
+            <el-tag v-if="row.synced" type="success" size="small" round>已同步</el-tag>
+            <el-tooltip v-else :content="row.last_error || '等待后台同步'"><el-tag type="danger" size="small" round>未同步</el-tag></el-tooltip>
+          </template>
         </template>
       </el-table-column>
-      <el-table-column label="已处理到" width="140"><template #default="{ row }">{{ fmtTime(row.progress) }}</template></el-table-column>
-      <el-table-column label="状态" width="90"><template #default="{ row }"><StatusTag kind="sub" :status="row.status" /></template></el-table-column>
-      <el-table-column label="操作" width="180">
+      <el-table-column label="已处理到" width="140">
+        <template #default="{ row }"><span v-if="row.kind === 'recipe' || row.kind === 'chamber'">{{ fmtTime(row.progress) }}</span></template>
+      </el-table-column>
+      <el-table-column label="状态" width="90">
+        <template #default="{ row }"><StatusTag v-if="row.kind === 'recipe'" kind="sub" :status="row.status" /></template>
+      </el-table-column>
+      <el-table-column label="操作" width="170">
         <template #default="{ row }">
-          <el-button v-if="row.status === 'running'" link type="warning" :disabled="!row.gde_sub_id" @click="pause(row)">暂停</el-button>
-          <el-button v-else-if="row.status === 'paused'" link type="success" @click="resume(row)">恢复</el-button>
-          <el-button link type="primary" :disabled="!row.operators.length" @click="openBatch(row, 'fill')">补算</el-button>
-          <el-button link type="danger" :disabled="!row.operators.length" @click="openBatch(row, 'overwrite')">重算</el-button>
+          <template v-if="row.kind === 'recipe'">
+            <el-button v-if="row.status === 'running'" link type="warning" :disabled="!row.gde_sub_id" @click="pause(row)">暂停</el-button>
+            <el-button v-else-if="row.status === 'paused'" link type="success" @click="resume(row)">恢复</el-button>
+            <el-button link type="primary" @click="openBatch(row, 'fill')">补算</el-button>
+            <el-button link type="danger" @click="openBatch(row, 'overwrite')">重算</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>
 
-    <div class="toolbar" style="margin-top: 22px">
-      <b>计算批次</b>
+    <div class="toolbar" style="margin-top: 26px">
+      <b class="block-title">计算批次</b>
       <span class="muted" style="font-size: 12px">实时计算按 recipe、整点归为一个批次；补算只算缺的值，重算覆盖已有值</span>
       <span class="spacer" />
       <el-select v-model="bf.recipe" placeholder="recipe" clearable filterable allow-create style="width: 140px" @change="searchBatches">
@@ -294,5 +331,13 @@ const pct = (b) => (b.run_total ? Math.round(((b.value_ok + b.value_null) / b.ru
 </template>
 
 <style scoped>
-.expand { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; padding: 4px 16px 10px 48px; }
+.id { font-size: 12px; margin-left: 6px; }
+.lv-badge { display: inline-block; font-size: 11px; line-height: 18px; padding: 0 8px; border-radius: 99px; margin-right: 8px; font-weight: 600; }
+.lv-badge.f { background: var(--brand-soft); color: var(--brand); }
+.lv-badge.o { background: #f3ecff; color: #8b5cf6; }
+.lv-badge.r { background: #fff3e6; color: #f08a24; }
+.lv-badge.c { background: #e8f8f1; color: #17a673; }
+.sched-tree :deep(.lv-feature) { background: #fbfcff; }
+.sched-tree :deep(.lv-feature td) { font-size: 14px; }
+.sched-tree :deep(.lv-chamber td) { color: var(--fg-soft); font-size: 12.5px; }
 </style>

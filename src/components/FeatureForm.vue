@@ -5,15 +5,14 @@ import { ElMessage } from 'element-plus'
 import { features } from '../api'
 import ErrorList from './ErrorList.vue'
 
-const props = defineProps({ modelValue: Boolean, base: Object, toolTypes: { type: Array, default: () => [] } }) // base：基于已有特征生成新版本
+const props = defineProps({ modelValue: Boolean, base: Object }) // base：基于已有特征生成新版本
 const emit = defineEmits(['update:modelValue', 'created'])
 const TEMPLATE = { id: 'my_feature', version: '1.0.0', desc: '这个特征算什么', output: { unit: '' } }
 const text = ref('')
 const errors = ref([])
 const parseError = ref('')
 const saving = ref(false)
-const name = ref('') // 显示名称、机台类型：只在新增特征时填写，之后在列表里随时修改
-const toolType = ref('')
+const name = ref('') // 显示名称：只在新增特征时填写，之后在列表里随时修改
 
 function bump(v) {
   const p = v.split('.').map(Number)
@@ -26,7 +25,6 @@ watch(
     errors.value = []
     parseError.value = ''
     name.value = ''
-    toolType.value = ''
     const spec = props.base ? { ...props.base.spec, version: bump(props.base.version) } : TEMPLATE
     text.value = JSON.stringify(spec, null, 2)
   },
@@ -45,8 +43,8 @@ async function save() {
   saving.value = true
   try {
     const f = await features.create(spec, { silent: true })
-    if (!props.base && (name.value.trim() || toolType.value?.trim())) {
-      await features.updateMeta(f.feature_id, { name: name.value.trim() || null, tool_type: toolType.value?.trim() || null })
+    if (!props.base && name.value.trim()) {
+      await features.updateMeta(f.feature_id, { name: name.value.trim() })
     }
     ElMessage.success(`已生成草稿 ${f.feature_id}@${f.version}`)
     emit('created', f)
@@ -68,12 +66,8 @@ async function save() {
     <div v-if="!base" style="display: flex; gap: 8px; margin-top: 10px; align-items: center">
       <span style="font-size: 13px">名称</span>
       <el-input v-model="name" maxlength="64" placeholder="显示名称（可选，之后可改）" style="width: 240px" />
-      <span style="font-size: 13px">机台类型</span>
-      <el-select v-model="toolType" filterable allow-create clearable default-first-option placeholder="如 ETCH" style="width: 150px">
-        <el-option v-for="t in toolTypes" :key="t" :label="t" :value="t" />
-      </el-select>
     </div>
-    <div v-if="!base" class="muted" style="font-size: 12px; margin-top: 4px">名称、机台类型不属于 feature.json，不随版本变化，修改不需要评审；id 一旦创建不可修改。</div>
+    <div v-if="!base" class="muted" style="font-size: 12px; margin-top: 4px">名称不属于 feature.json，不随版本变化，修改不需要评审；id 一旦创建不可修改。关联的机台不用填：由算子绑定的 recipe 自动得出。</div>
     <div v-if="parseError" class="err-list" style="list-style: none; padding: 0">{{ parseError }}</div>
     <ErrorList :errors="errors" />
     <template #footer>
