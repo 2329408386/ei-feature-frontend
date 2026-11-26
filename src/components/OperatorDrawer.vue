@@ -24,11 +24,12 @@ watch(
 </script>
 
 <template>
-  <el-drawer :model-value="modelValue" size="760px" :title="target ? `${target.feature_id}/${target.name}@${target.version}` : ''" @update:model-value="emit('update:modelValue', $event)">
+  <el-drawer :model-value="modelValue" size="760px" :title="target ? `${target.display_name ? target.display_name + ' · ' : ''}${target.feature_id}/${target.name}@${target.version}` : ''" @update:model-value="emit('update:modelValue', $event)">
     <div v-if="detail">
       <el-descriptions :column="2" border size="small">
         <el-descriptions-item label="状态"><StatusTag :status="detail.status" /></el-descriptions-item>
         <el-descriptions-item label="文件"><span class="mono">{{ detail.code_file }}</span></el-descriptions-item>
+        <el-descriptions-item label="名称" :span="2">{{ detail.display_name || '—' }} <span class="muted" style="font-size: 12px">（算子名 {{ detail.name }} 不可修改，名称在特征页修改）</span></el-descriptions-item>
         <el-descriptions-item label="描述" :span="2">{{ detail.description }}</el-descriptions-item>
         <el-descriptions-item label="提交人">{{ detail.created_by }} · {{ fmtTime(detail.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="发布">{{ detail.published_by ? `${detail.published_by} · ${fmtTime(detail.published_at)}` : '—' }}</el-descriptions-item>

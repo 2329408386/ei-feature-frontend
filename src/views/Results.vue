@@ -1,32 +1,44 @@
 <script setup>
-// 结果：按机台、腔室、特征 → 算子、7 / 30 天查特征值；折线图三种点（正常值、重算后的值、空值），点击看来源
+// 结果：按 recipe、机台、腔室、特征 → 算子、7 / 30 天查特征值；折线图三种点（正常值、重算后的值、空值），点击看来源
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import * as echarts from 'echarts'
 import { batches, features, operators, schedules, values } from '../api'
-import { BATCH_MODE, daysAgo, fmtNum, fmtTime, today } from '../util'
+import { BATCH_MODE, daysAgo, fmtNum, fmtTime, labelOf, today } from '../util'
 import StatusTag from '../components/StatusTag.vue'
 
-const f = reactive({ tool: '', chamber: '', feature_id: '', operator: '', days: 7 })
+const f = reactive({ recipe: '', tool: '', chamber: '', feature_id: '', operator: '', days: 7 })
 const featureList = ref([]) // 特征（每个 feature_id 一条，取最新版本，用于显示单位）
 const opList = ref([]) // 所选特征下的全部算子版本
-const chambers = ref([]) // [{tool, chamber}]
+const subs = ref([]) // 调度页的 recipe 行：{recipe, chambers: [{tool, chamber}]}
 const rows = ref([])
 const overwriteIds = ref(new Set())
 const loading = ref(false)
 const truncated = ref(false)
 
+const recipeOptions = computed(() => subs.value.map((s) => s.recipe))
+// 机台 / 腔室候选：选了 recipe 时只列跑过它的
+const chambers = computed(() => {
+  const m = new Map()
+  for (const s of subs.value) {
+    if (f.recipe && s.recipe !== f.recipe) continue
+    for (const c of s.chambers || []) m.set(`${c.tool}|${c.chamber}`, c)
+  }
+  return [...m.values()]
+})
 const tools = computed(() => [...new Set(chambers.value.map((c) => c.tool))].sort())
-const chamberOptions = computed(() => chambers.value.filter((c) => !f.tool || c.tool === f.tool).map((c) => c.chamber))
+const chamberOptions = computed(() => [...new Set(chambers.value.filter((c) => !f.tool || c.tool === f.tool).map((c) => c.chamber))].sort())
 const unit = computed(() => featureList.value.find((x) => x.feature_id === f.feature_id)?.unit || '')
 
 onMounted(async () => {
-  const [fs, subs] = await Promise.all([features.list({ page_size: 200 }), schedules.list()])
+  const [fs, ss] = await Promise.all([features.list({ page_size: 200 }), schedules.list()])
   const seen = new Map()
   for (const x of fs.items) if (!seen.has(x.feature_id)) seen.set(x.feature_id, x)
   featureList.value = [...seen.values()]
-  chambers.value = subs.map((s) => ({ tool: s.tool, chamber: s.chamber }))
-  if (featureList.value.length) {
-    f.feature_id = featureList.value[0].feature_id
+  subs.value = ss
+  // 默认选第一个已发布的特征（草稿还没有算子和值）
+  const first = featureList.value.find((x) => x.status === 'published') || featureList.value[0]
+  if (first) {
+    f.feature_id = first.feature_id
     await onFeature()
   }
 })
@@ -50,7 +62,7 @@ async function load() {
   loading.value = true
   selected.value = null
   try {
-    const params = { operator: f.operator, tool: f.tool, chamber: f.chamber, from: daysAgo(f.days), to: today(), page_size: 1000 }
+    const params = { operator: f.operator, recipe: f.recipe, tool: f.tool, chamber: f.chamber, from: daysAgo(f.days), to: today(), page_size: 1000 }
     const all = []
     let page = 1
     // 最多取 5 页（5000 个点），再多就提示缩小范围
@@ -61,14 +73,15 @@ async function load() {
     }
     truncated.value = page > 5
     rows.value = all
-    const ow = await batches.list({ mode: 'overwrite', chamber: f.chamber || undefined, page_size: 200 })
+    const ow = await batches.list({ mode: 'overwrite', recipe: f.recipe || undefined, page_size: 200 })
     overwriteIds.value = new Set(ow.items.map((b) => b.batch_id))
   } finally {
     loading.value = false
   }
 }
-watch(() => [f.tool, f.chamber, f.days], load)
-watch(() => f.tool, () => {
+watch(() => [f.recipe, f.tool, f.chamber, f.days], load)
+watch(() => [f.recipe, f.tool], () => {
+  if (f.tool && !tools.value.includes(f.tool)) f.tool = ''
   if (f.chamber && !chamberOptions.value.includes(f.chamber)) f.chamber = ''
 })
 
@@ -176,6 +189,9 @@ function showNullsOf(reason) {
 <template>
   <div class="page">
     <div class="toolbar">
+      <el-select v-model="f.recipe" placeholder="recipe" clearable filterable allow-create style="width: 140px">
+        <el-option v-for="r in recipeOptions" :key="r" :label="r" :value="r" />
+      </el-select>
       <el-select v-model="f.tool" placeholder="机台" clearable style="width: 120px">
         <el-option v-for="t in tools" :key="t" :label="t" :value="t" />
       </el-select>
@@ -183,14 +199,15 @@ function showNullsOf(reason) {
         <el-option v-for="c in chamberOptions" :key="c" :label="c" :value="c" />
       </el-select>
       <el-select v-model="f.feature_id" placeholder="特征" filterable style="width: 200px" @change="onFeature">
-        <el-option v-for="x in featureList" :key="x.feature_id" :label="x.feature_id" :value="x.feature_id">
-          <span>{{ x.feature_id }}</span> <span class="muted" style="font-size: 12px">{{ x.description }}</span>
+        <el-option v-for="x in featureList" :key="x.feature_id" :label="labelOf(x.feature_id, x.display_name)" :value="x.feature_id">
+          <span>{{ labelOf(x.feature_id, x.display_name) }}</span> <span class="muted" style="font-size: 12px">{{ x.description }}</span>
         </el-option>
       </el-select>
       <span class="muted">→</span>
       <el-select v-model="f.operator" placeholder="算子" style="width: 260px" @change="load">
         <el-option v-for="o in opList" :key="o.ref" :label="o.ref" :value="o.ref">
           <span class="mono">{{ o.name }}@{{ o.version }}</span>
+          <span v-if="o.display_name" style="margin-left: 6px">{{ o.display_name }}</span>
           <StatusTag :status="o.status" style="margin-left: 8px" />
         </el-option>
       </el-select>

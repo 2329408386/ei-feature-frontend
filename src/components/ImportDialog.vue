@@ -71,9 +71,9 @@ const newCount = () => (result.value?.items || []).filter((i) => i.action === 'n
       <el-upload :auto-upload="false" :show-file-list="false" accept=".json" :on-change="onFile">
         <el-button>选择导出的 JSON 文件</el-button>
       </el-upload>
-      <span class="muted" style="font-size: 12px">或直接粘贴；格式 ei-feature-service.bindings/v2，每个算子独立校验</span>
+      <span class="muted" style="font-size: 12px">或直接粘贴；格式 ei-feature-service.bindings/v3，每个算子独立校验</span>
     </div>
-    <textarea v-model="text" class="code-input" rows="10" spellcheck="false" placeholder='{"format": "ei-feature-service.bindings/v2", "bindings": [...]}' />
+    <textarea v-model="text" class="code-input" rows="10" spellcheck="false" placeholder='{"format": "ei-feature-service.bindings/v3", "bindings": [...]}' />
     <div v-if="error" class="err-list" style="list-style: none; padding: 0">{{ error }}</div>
     <el-table v-if="result" :data="result.items" size="small" border style="margin-top: 10px">
       <el-table-column label="算子" min-width="180"><template #default="{ row }"><span class="mono">{{ row.feature_id }}/{{ row.operator }}</span></template></el-table-column>

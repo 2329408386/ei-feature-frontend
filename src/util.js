@@ -66,15 +66,13 @@ export function parseRef(ref) {
   return m ? { feature_id: m[1], operator: m[2], version: Number(m[3]) } : null
 }
 
-/** 把绑定 spec 规范化（recipe 按名称、腔室按 (tool, chamber) 排序），用于比较是否有修改 */
+/** 把绑定 spec 规范化（recipe 去重排序），用于比较是否有修改 */
 export function normalizeSpec(spec) {
-  const recipes = (spec.recipes || [])
-    .map((r) => ({
-      recipe: r.recipe,
-      chambers: [...r.chambers]
-        .sort((a, b) => (a.tool + '\0' + a.chamber).localeCompare(b.tool + '\0' + b.chamber))
-        .map((c) => ({ tool: c.tool, chamber: c.chamber })),
-    }))
-    .sort((a, b) => a.recipe.localeCompare(b.recipe))
+  const recipes = [...new Set((spec.recipes || []).map((r) => String(r).trim()))].sort()
   return { feature_id: spec.feature_id, operator: spec.operator, version: spec.version, recipes }
+}
+
+/** 显示名称：有名称时“名称（ID）”，没有时只显示 ID */
+export function labelOf(id, name) {
+  return name ? `${name}（${id}）` : id
 }

@@ -32,6 +32,7 @@ def compute(data):
 const specText = ref('')
 const code = ref('')
 const codeFile = ref('')
+const displayName = ref('') // 显示名称：只在新算子（新的 name）时填写，之后在列表里随时修改
 const errors = ref([])
 const saving = ref(false)
 
@@ -41,6 +42,7 @@ watch(
     if (!open) return
     errors.value = []
     codeFile.value = ''
+    displayName.value = ''
     if (props.base) {
       specText.value = JSON.stringify(props.base.spec, null, 2)
       code.value = props.base.code || ''
@@ -93,6 +95,9 @@ async function save() {
     const body = { feature_id: props.featureId, spec, code: code.value }
     if (codeFile.value.trim()) body.code_file = codeFile.value.trim()
     const o = await operators.create(body, { silent: true })
+    if (o.version === 1 && displayName.value.trim()) {
+      await operators.updateMeta(o.feature_id, o.name, { name: displayName.value.trim() })
+    }
     ElMessage.success(`已生成草稿 ${o.ref}（${o.code_file}）`)
     emit('created', o)
     emit('update:modelValue', false)
@@ -125,6 +130,11 @@ async function save() {
       <span class="muted" style="font-size: 12px">可选，不填为 {{ defaultFile }}</span>
     </div>
     <ErrorList :errors="errorsOf('code_file')" />
+    <div v-if="nextVersion === 1" style="display: flex; align-items: center; gap: 8px; margin-top: 12px">
+      <span class="section-title" style="margin: 0">显示名称</span>
+      <el-input v-model="displayName" maxlength="64" placeholder="可选，之后可改" style="width: 280px" />
+      <span class="muted" style="font-size: 12px">operator.json 里的 name 是 ID，创建后不可修改；显示名称随时可改</span>
+    </div>
     <ErrorList :errors="errorsOf('other')" />
 
     <template #footer>

@@ -9,12 +9,18 @@ import FeatureForm from '../components/FeatureForm.vue'
 import OperatorForm from '../components/OperatorForm.vue'
 import ReviewDialog from '../components/ReviewDialog.vue'
 import OperatorDrawer from '../components/OperatorDrawer.vue'
+import MetaDialog from '../components/MetaDialog.vue'
+import { Edit } from '@element-plus/icons-vue'
 
 const me = DEV_USER_SWITCH ? devUser.name : null
 const mine = (row) => !me || row.created_by === me
 const others = (row) => !me || row.created_by !== me
 
-const filter = reactive({ status: '', q: '' })
+const filter = reactive({ status: '', tool_type: '', q: '' })
+const toolTypes = ref([])
+async function loadToolTypes() {
+  toolTypes.value = await features.toolTypes()
+}
 const pager = reactive({ page: 1, page_size: 20, total: 0 })
 const rows = ref([])
 const opsByFeature = ref({}) // feature_id -> [Operator]
@@ -33,7 +39,10 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => {
+  load()
+  loadToolTypes()
+})
 function search() {
   pager.page = 1
   load()
@@ -50,6 +59,14 @@ const featureForm = reactive({ open: false, base: null })
 const opForm = reactive({ open: false, featureId: '', base: null })
 const review = reactive({ open: false, kind: 'feature', target: null })
 const drawer = reactive({ open: false, target: null })
+const metaDlg = reactive({ open: false, kind: 'feature', target: null })
+function editMeta(kind, target) {
+  Object.assign(metaDlg, { kind, target, open: true })
+}
+function onMetaSaved() {
+  load()
+  loadToolTypes()
+}
 
 function newFeature(base = null) {
   featureForm.base = base
@@ -86,9 +103,9 @@ async function retireFeature(f) {
     { inputPlaceholder: '下线原因（必填）', inputValidator: (v) => !!v?.trim() || '请填写原因', type: 'warning', confirmButtonText: '下线' },
   )
   const r = await features.retire(f.feature_id, f.version, value.trim())
-  const chambers = [...new Set(r.affected.flatMap((a) => a.chambers))]
+  const recipes = [...new Set(r.affected.flatMap((a) => a.recipes))]
   ElMessageBox.alert(
-    `一并下线的算子：${r.operators.join('，') || '无'}\n不再计算的腔室：${chambers.join('，') || '无'}`,
+    `一并下线的算子：${r.operators.join('，') || '无'}\n不再计算的 recipe：${recipes.join('，') || '无'}`,
     '已下线',
     { type: 'success' },
   )
@@ -115,8 +132,8 @@ async function retireOp(o) {
     confirmButtonText: '下线',
   })
   const r = await operators.retire(o.feature_id, o.name, o.version, value.trim())
-  const chambers = r.affected.flatMap((a) => a.chambers)
-  ElMessage.success(chambers.length ? `已下线；不再计算的腔室：${chambers.join('，')}` : '已下线')
+  const recipes = r.affected.flatMap((a) => a.recipes)
+  ElMessage.success(recipes.length ? `已下线；不再计算的 recipe：${recipes.join('，')}` : '已下线')
   load()
 }
 </script>
@@ -126,13 +143,16 @@ async function retireOp(o) {
     <div class="toolbar">
       <span class="muted" style="font-size: 13px">草稿 → 待评审 → 已发布 → 已下线</span>
       <span class="spacer" />
+      <el-select v-model="filter.tool_type" placeholder="全部机台类型" clearable filterable style="width: 140px" @change="search">
+        <el-option v-for="t in toolTypes" :key="t" :label="t" :value="t" />
+      </el-select>
       <el-select v-model="filter.status" placeholder="全部状态" clearable style="width: 120px" @change="search">
         <el-option label="草稿" value="draft" />
         <el-option label="待评审" value="review" />
         <el-option label="已发布" value="published" />
         <el-option label="已下线" value="retired" />
       </el-select>
-      <el-input v-model="filter.q" placeholder="特征 ID 或说明" clearable style="width: 220px" @keyup.enter="search" @clear="search" />
+      <el-input v-model="filter.q" placeholder="特征 ID、名称或说明" clearable style="width: 220px" @keyup.enter="search" @clear="search" />
       <el-button @click="search">查询</el-button>
       <el-button type="primary" @click="newFeature()">新增特征</el-button>
     </div>
@@ -148,8 +168,12 @@ async function retireOp(o) {
               <el-button size="small" type="primary" plain :disabled="allRetired(row.feature_id)" @click="newOperator(row.feature_id)">新增算子</el-button>
             </div>
             <el-table :data="opsByFeature[row.feature_id] || []" size="small" border empty-text="还没有算子">
-              <el-table-column label="算子" min-width="140">
-                <template #default="{ row: o }"><el-link type="primary" @click="openDrawer(o)">{{ o.name }}</el-link></template>
+              <el-table-column label="算子" min-width="180">
+                <template #default="{ row: o }">
+                  <el-link type="primary" @click="openDrawer(o)">{{ o.display_name || o.name }}</el-link>
+                  <span v-if="o.display_name" class="muted mono" style="font-size: 12px; margin-left: 4px">{{ o.name }}</span>
+                  <el-button link size="small" style="margin-left: 4px" title="修改名称" @click="editMeta('operator', o)"><el-icon><Edit /></el-icon></el-button>
+                </template>
               </el-table-column>
               <el-table-column label="版本" width="70"><template #default="{ row: o }">v{{ o.version }}</template></el-table-column>
               <el-table-column label="说明" prop="description" min-width="220" show-overflow-tooltip />
@@ -170,7 +194,16 @@ async function retireOp(o) {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="特征" min-width="170"><template #default="{ row }"><b class="mono">{{ row.feature_id }}</b></template></el-table-column>
+      <el-table-column label="特征" min-width="200">
+        <template #default="{ row }">
+          <b>{{ row.display_name || row.feature_id }}</b>
+          <el-button link size="small" style="margin-left: 4px" title="修改名称 / 机台类型" @click="editMeta('feature', row)"><el-icon><Edit /></el-icon></el-button>
+          <div v-if="row.display_name" class="muted mono" style="font-size: 12px">{{ row.feature_id }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="机台类型" width="100">
+        <template #default="{ row }"><el-tag v-if="row.tool_type" size="small" type="info">{{ row.tool_type }}</el-tag><span v-else class="muted">—</span></template>
+      </el-table-column>
       <el-table-column label="版本" prop="version" width="80" />
       <el-table-column label="说明" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">{{ row.description }}<span v-if="row.unit" class="muted">（{{ row.unit }}）</span></template>
@@ -203,7 +236,8 @@ async function retireOp(o) {
     <el-pagination v-if="pager.total > pager.page_size" v-model:current-page="pager.page" :page-size="pager.page_size" :total="pager.total"
       layout="total, prev, pager, next" style="margin-top: 12px; justify-content: flex-end" @current-change="load" />
 
-    <FeatureForm v-model="featureForm.open" :base="featureForm.base" @created="load" />
+    <FeatureForm v-model="featureForm.open" :base="featureForm.base" :tool-types="toolTypes" @created="onMetaSaved" />
+    <MetaDialog v-model="metaDlg.open" :kind="metaDlg.kind" :target="metaDlg.target" :tool-types="toolTypes" @saved="onMetaSaved" />
     <OperatorForm v-model="opForm.open" :feature-id="opForm.featureId" :existing="opsByFeature[opForm.featureId] || []" :base="opForm.base" @created="load" />
     <ReviewDialog v-model="review.open" :kind="review.kind" :target="review.target" @done="load" />
     <OperatorDrawer v-model="drawer.open" :target="drawer.target" />

@@ -1,35 +1,33 @@
 <script setup>
-// 算子绑定：左侧算子列表 + 右侧四步编辑（fleet → recipe → 反查机台 / 腔室 → 版本、JSON、修订）
+// 算子绑定：左侧算子列表 + 右侧编辑（选 recipe → 算子版本、JSON、修订）。
+// 不选机台 / 腔室：审核通过后按 recipe 订阅 GDE，GDE 自动推送该 recipe 在所有机台 / 腔室上的 run_id（含以后新增的腔室）。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bindings, features, gde, operators } from '../api'
 import { DEV_USER_SWITCH, devUser } from '../api/http'
-import { daysAgo, fmtTime, normalizeSpec, today } from '../util'
+import { fmtTime, labelOf, normalizeSpec } from '../util'
 import StatusTag from '../components/StatusTag.vue'
 import ErrorList from '../components/ErrorList.vue'
 import JsonDiff from '../components/JsonDiff.vue'
 import ImportDialog from '../components/ImportDialog.vue'
 
 const me = DEV_USER_SWITCH ? devUser.name : null
-const key = (c) => `${c.tool}|${c.chamber}`
-const unkey = (k) => {
-  const [tool, chamber] = k.split('|')
-  return { tool, chamber }
-}
 function groupByTool(list) {
   const g = {}
-  for (const c of list) (g[c.tool] ||= []).push(c)
+  for (const c of list) (g[c.tool] ||= []).push(c.chamber)
   return Object.entries(g).sort(([a], [b]) => a.localeCompare(b))
 }
 
 // ======================================================== 左侧：算子列表
-const filter = reactive({ feature_id: '', operator: '', tool: '', chamber: '', recipe: '', status: '' })
-const featureIds = ref([])
+const filter = reactive({ feature_id: '', operator: '', recipe: '', status: '' })
+const featureList = ref([]) // [{feature_id, display_name}]
+const featureNames = computed(() => Object.fromEntries(featureList.value.map((f) => [f.feature_id, f.display_name])))
+const opNames = ref({}) // "fid/op" -> display_name
 const items = ref([]) // [{feature_id, operator, active, pending}]
 const listLoading = ref(false)
 const selected = ref(null) // {feature_id, operator}
 
-const bindingFilterOn = computed(() => !!(filter.tool || filter.chamber || filter.recipe || filter.status))
+const bindingFilterOn = computed(() => !!(filter.recipe || filter.status))
 
 async function loadList() {
   listLoading.value = true
@@ -37,14 +35,15 @@ async function loadList() {
     const params = { ...filter }
     const [b, pub] = await Promise.all([
       bindings.list(params),
-      // 没有绑定过的已发布算子也要能选；按机台 / 腔室 / recipe / 状态筛选时只看绑定结果
+      // 没有绑定过的已发布算子也要能选；按 recipe / 状态筛选时只看绑定结果
       bindingFilterOn.value ? null : operators.list({ status: 'published', feature_id: filter.feature_id || undefined, page_size: 200 }),
     ])
     const map = new Map()
     for (const it of b.items) map.set(`${it.feature_id}/${it.operator}`, it)
     if (pub) {
       for (const o of pub.items) {
-        if (filter.operator && !o.name.includes(filter.operator)) continue
+        if (o.display_name) opNames.value[`${o.feature_id}/${o.name}`] = o.display_name
+        if (filter.operator && !o.name.includes(filter.operator) && !(o.display_name || '').includes(filter.operator)) continue
         const k = `${o.feature_id}/${o.name}`
         if (!map.has(k)) map.set(k, { feature_id: o.feature_id, operator: o.name, active: null, pending: null })
       }
@@ -60,20 +59,19 @@ async function loadList() {
 }
 onMounted(async () => {
   loadList()
-  const r = await features.list({ page_size: 200 })
-  featureIds.value = [...new Set(r.items.map((f) => f.feature_id))].sort()
+  const [fs, ops] = await Promise.all([features.list({ page_size: 200 }), operators.list({ page_size: 200 })])
+  const seen = new Map()
+  for (const f of fs.items) if (!seen.has(f.feature_id)) seen.set(f.feature_id, f)
+  featureList.value = [...seen.values()].sort((a, b) => a.feature_id.localeCompare(b.feature_id))
+  for (const o of ops.items) if (o.display_name) opNames.value[`${o.feature_id}/${o.name}`] = o.display_name
 })
 const grouped = computed(() => {
   const g = {}
   for (const it of items.value) (g[it.feature_id] ||= []).push(it)
   return Object.entries(g)
 })
-function recipeCount(it) {
-  return it.active?.spec.recipes.length || 0
-}
-function chamberCount(it) {
-  return new Set((it.active?.spec.recipes || []).flatMap((r) => r.chambers.map(key))).size
-}
+const opName = (it) => opNames.value[`${it.feature_id}/${it.operator}`]
+const recipeCount = (it) => it.active?.spec.recipes.length || 0
 
 // ======================================================== 右侧：编辑状态
 const revisions = ref([])
@@ -81,14 +79,8 @@ const versions = ref([]) // 该算子已发布的版本（降序）
 const base = ref(null) // 编辑的基准修订（生效中的）
 const ed = reactive({
   version: null,
-  fleet: '',
-  range: [daysAgo(30), today()],
-  fleetChambers: [],
-  fleetChecked: [],
-  fleetLoading: false,
-  recipes: [], // [{recipe, candidates: [], checked: [], loading, error, showOut}]
+  recipes: [], // [{recipe, chambers: [{tool, chamber}], loading, error, open}]
 })
-const fleets = ref([])
 const errors = ref([])
 const submitting = ref(false)
 
@@ -102,98 +94,18 @@ async function select(it) {
   revisions.value = revs.revisions
   versions.value = pub.items.map((o) => o.version).sort((a, b) => b - a)
   base.value = it.active
-  await loadSpec(it.active?.spec)
+  loadSpec(it.active?.spec)
 }
 
 /** 把一个绑定 spec 载入编辑器；没有则清空（版本默认最新已发布） */
-async function loadSpec(spec) {
+function loadSpec(spec) {
   errors.value = []
   ed.version = versions.value.includes(spec?.version) ? spec.version : versions.value[0] ?? spec?.version ?? null
-  ed.fleet = spec?.fleet?.name || ''
-  ed.range = spec?.fleet ? [spec.fleet.start, spec.fleet.end] : [daysAgo(30), today()]
-  ed.fleetChambers = []
-  ed.fleetChecked = []
-  ed.recipes = (spec?.recipes || []).map((r) => ({
-    recipe: r.recipe,
-    candidates: [],
-    checked: r.chambers.map(key),
-    loading: true,
-    error: '',
-    showOut: false,
-  }))
-  const tasks = ed.recipes.map((r) => loadCandidates(r, false))
-  if (ed.fleet) {
-    tasks.push(loadFleetChambers(false))
-  }
-  await Promise.all(tasks)
-  if (ed.fleet) {
-    // 回显：fleet 下腔室默认全部勾选；但已绑定、却不在 fleet 中的腔室保持原样
-    ed.fleetChecked = ed.fleetChambers.map(key)
-  }
-  fleetSnap = [...ed.fleetChecked]
+  ed.recipes = []
+  for (const r of spec?.recipes || []) addRecipe(r)
 }
 
-// ---- ① fleet + 时间范围
-async function loadFleets() {
-  if (!fleets.value.length) fleets.value = await gde.fleets()
-}
-onMounted(loadFleets)
-async function loadFleetChambers(applyDefault = true) {
-  if (!ed.fleet) {
-    ed.fleetChambers = []
-    ed.fleetChecked = []
-    fleetSnap = []
-    return
-  }
-  ed.fleetLoading = true
-  try {
-    const [start, end] = ed.range || []
-    ed.fleetChambers = await gde.fleetChambers(ed.fleet, start, end)
-    if (applyDefault) {
-      ed.fleetChecked = ed.fleetChambers.map(key) // 默认全部勾选
-      // 已选 recipe 中 fleet 范围内的腔室勾上，范围外的取消
-      for (const r of ed.recipes) r.checked = r.candidates.map(key).filter((k) => ed.fleetChecked.includes(k))
-    }
-    fleetSnap = [...ed.fleetChecked]
-  } finally {
-    ed.fleetLoading = false
-  }
-}
-const fleetSet = computed(() => new Set(ed.fleetChecked))
-const hasFleet = computed(() => !!ed.fleet && ed.fleetChambers.length > 0)
-// 第 ① 步由用户勾选变化时同步到各 recipe：取消的腔室在 recipe 里也取消，重新勾上的在跑过的 recipe 里勾上
-// （程序回显时不走这里，所以载入已有修订不会改动它的腔室）
-let fleetSnap = []
-function onFleetChange() {
-  const now = ed.fleetChecked
-  const added = now.filter((k) => !fleetSnap.includes(k))
-  const removed = fleetSnap.filter((k) => !now.includes(k))
-  for (const r of ed.recipes) {
-    const cand = new Set(r.candidates.map(key))
-    r.checked = r.checked.filter((k) => !removed.includes(k))
-    for (const k of added) if (cand.has(k) && !r.checked.includes(k)) r.checked.push(k)
-  }
-  fleetSnap = [...now]
-}
-/** 机台一级复选框的勾选 / 半选状态 */
-function toolState(checked, list) {
-  const n = list.filter((c) => checked.includes(key(c))).length
-  return { modelValue: n > 0 && n === list.length, indeterminate: n > 0 && n < list.length }
-}
-function toggleIn(obj, field, k, on) {
-  obj[field] = on ? [...new Set([...obj[field], k])] : obj[field].filter((x) => x !== k)
-}
-function toggleFleet(k, on) {
-  toggleIn(ed, 'fleetChecked', k, on)
-  onFleetChange()
-}
-function toggleTool(tool, on) {
-  const ks = ed.fleetChambers.filter((c) => c.tool === tool).map(key)
-  ed.fleetChecked = on ? [...new Set([...ed.fleetChecked, ...ks])] : ed.fleetChecked.filter((k) => !ks.includes(k))
-  onFleetChange()
-}
-
-// ---- ② recipe 模糊选择（防抖 300 ms）
+// ---- ① recipe 模糊选择（防抖 300 ms）
 const recipeOptions = ref([])
 const recipeLoading = ref(false)
 const recipePick = ref('')
@@ -209,62 +121,46 @@ function searchRecipes(q) {
     }
   }, 300)
 }
-async function addRecipe(name) {
+function addRecipe(name) {
   recipePick.value = ''
   if (!name || ed.recipes.some((r) => r.recipe === name)) return
-  const r = reactive({ recipe: name, candidates: [], checked: [], loading: true, error: '', showOut: false })
+  const r = reactive({ recipe: name, chambers: [], loading: true, error: '', open: false })
   ed.recipes.push(r)
-  await loadCandidates(r, true)
+  loadChambers(r)
 }
 function removeRecipe(i) {
   ed.recipes.splice(i, 1)
   errors.value = []
 }
-
-// ---- ③ 反查机台 / 腔室
-async function loadCandidates(r, applyDefault) {
+/** 只读展示：GDE 当前已知跑过该 recipe 的机台 / 腔室（以后新增的腔室会自动推送） */
+async function loadChambers(r) {
   r.loading = true
   r.error = ''
   try {
-    r.candidates = await gde.recipeChambers(r.recipe)
-    if (applyDefault) {
-      // 默认勾选 fleet 范围内的；没选 fleet 时全部勾选
-      r.checked = r.candidates.map(key).filter((k) => !hasFleet.value || fleetSet.value.has(k))
-    }
+    r.chambers = await gde.recipeChambers(r.recipe)
   } catch (e) {
     r.error = `${e.code}：${e.message}`
   } finally {
     r.loading = false
   }
 }
-const inScope = (r) => r.candidates.filter((c) => !hasFleet.value || fleetSet.value.has(key(c)))
-const outScope = (r) => (hasFleet.value ? r.candidates.filter((c) => !fleetSet.value.has(key(c))) : [])
-function setRecipeTool(r, tool, list, on) {
-  const ks = list.filter((c) => c.tool === tool).map(key)
-  r.checked = on ? [...new Set([...r.checked, ...ks])] : r.checked.filter((k) => !ks.includes(k))
-}
-function recipeErrors(i) {
-  return errors.value.filter((e) => e.path && (e.path === `recipes[${i}]` || e.path.startsWith(`recipes[${i}].`) || e.path.startsWith(`recipes[${i}]`)))
-}
-const otherErrors = computed(() => errors.value.filter((e) => !e.path || !e.path.startsWith('recipes[')))
+const recipeErrors = (i) => errors.value.filter((e) => e.path === `recipes[${i}]`)
+const otherErrors = computed(() => errors.value.filter((e) => !e.path || !/^recipes\[\d+\]$/.test(e.path)))
+const totalChambers = computed(() => new Set(ed.recipes.flatMap((r) => r.chambers.map((c) => `${c.tool}|${c.chamber}`))).size)
+const toolCount = (r) => new Set(r.chambers.map((c) => c.tool)).size
 
-// ---- ④ 生成的绑定 JSON
+// ---- ② 生成的绑定 JSON
 const generated = computed(() => {
   if (!selected.value) return null
-  const spec = {
+  return {
     feature_id: selected.value.feature_id,
     operator: selected.value.operator,
     version: ed.version,
+    recipes: ed.recipes.map((r) => r.recipe),
   }
-  if (ed.fleet && ed.range?.length === 2) spec.fleet = { name: ed.fleet, start: ed.range[0], end: ed.range[1] }
-  spec.recipes = ed.recipes.map((r) => ({ recipe: r.recipe, chambers: r.checked.map(unkey) }))
-  return spec
 })
 const baseSpec = computed(() => base.value?.spec || null)
-function sameSpec(a, b) {
-  if (!a || !b) return false
-  return JSON.stringify(normalizeSpec(a)) === JSON.stringify(normalizeSpec(b)) && JSON.stringify(a.fleet || null) === JSON.stringify(b.fleet || null)
-}
+const sameSpec = (a, b) => !!a && !!b && JSON.stringify(normalizeSpec(a)) === JSON.stringify(normalizeSpec(b))
 const dirty = computed(() => {
   if (!generated.value) return false
   if (!baseSpec.value) return ed.recipes.length > 0
@@ -288,8 +184,8 @@ async function submit() {
     submitting.value = false
   }
 }
-async function revert() {
-  await loadSpec(baseSpec.value)
+function revert() {
+  loadSpec(baseSpec.value)
 }
 async function refreshSelected() {
   await loadList()
@@ -308,7 +204,7 @@ async function reviewPending(decision) {
     comment = value.trim()
   }
   await bindings.review(it.feature_id, it.operator, pending.value.revision, { decision, comment })
-  ElMessage.success(decision === 'approve' ? '已生效，正在同步腔室订阅' : '已退回')
+  ElMessage.success(decision === 'approve' ? '已生效，正在按 recipe 同步 GDE 订阅' : '已退回')
   await refreshSelected()
 }
 async function withdrawPending() {
@@ -367,7 +263,7 @@ async function doExport() {
 <template>
   <div class="page bindings">
     <div class="toolbar">
-      <span class="muted" style="font-size: 13px">fleet、腔室、recipe 经 /api/gde 从 GDE 获取；recipe 绑到算子上，审核通过后同步 GDE 订阅</span>
+      <span class="muted" style="font-size: 13px">只绑 recipe：审核通过后按 recipe 订阅 GDE，GDE 自动推送该 recipe 下所有机台 / 腔室的 run_id，新增腔室也会自动计算</span>
       <span class="spacer" />
       <el-button @click="importOpen = true">导入</el-button>
       <el-button @click="doExport">导出</el-button>
@@ -377,11 +273,9 @@ async function doExport() {
       <div class="left card">
         <div class="filters">
           <el-select v-model="filter.feature_id" placeholder="特征" clearable filterable size="small" @change="loadList">
-            <el-option v-for="f in featureIds" :key="f" :label="f" :value="f" />
+            <el-option v-for="f in featureList" :key="f.feature_id" :label="labelOf(f.feature_id, f.display_name)" :value="f.feature_id" />
           </el-select>
           <el-input v-model="filter.operator" placeholder="算子" clearable size="small" @change="loadList" />
-          <el-input v-model="filter.tool" placeholder="机台" clearable size="small" @change="loadList" />
-          <el-input v-model="filter.chamber" placeholder="腔室" clearable size="small" @change="loadList" />
           <el-input v-model="filter.recipe" placeholder="recipe" clearable size="small" @change="loadList" />
           <el-select v-model="filter.status" placeholder="状态" clearable size="small" @change="loadList">
             <el-option label="生效中" value="active" />
@@ -391,18 +285,19 @@ async function doExport() {
         <div v-loading="listLoading" class="op-list">
           <div v-if="!items.length" class="muted" style="padding: 20px; text-align: center; font-size: 13px">没有匹配的算子</div>
           <template v-for="[fid, list] in grouped" :key="fid">
-            <div class="group">{{ fid }}</div>
+            <div class="group">{{ labelOf(fid, featureNames[fid]) }}</div>
             <div v-for="it in list" :key="it.operator" class="op-item" :class="{ on: selected && selected.feature_id === it.feature_id && selected.operator === it.operator }" @click="select(it)">
               <div style="display: flex; align-items: center; gap: 6px">
-                <b>{{ it.operator }}</b>
+                <b>{{ opName(it) || it.operator }}</b>
+                <span v-if="opName(it)" class="muted mono" style="font-size: 11px">{{ it.operator }}</span>
                 <span v-if="it.active" class="muted" style="font-size: 12px">v{{ it.active.version }} · #{{ it.active.revision }}</span>
                 <span class="spacer" style="flex: 1" />
                 <el-tag v-if="it.pending" type="warning" size="small">待审核</el-tag>
                 <el-tag v-else-if="it.active && it.active.spec.recipes.length" type="success" size="small">生效中</el-tag>
                 <el-tag v-else type="info" size="small">未绑定</el-tag>
               </div>
-              <div v-if="it.active && recipeCount(it)" class="muted" style="font-size: 12px; margin-top: 2px">
-                {{ recipeCount(it) }} 个 recipe · {{ chamberCount(it) }} 个腔室
+              <div v-if="recipeCount(it)" class="muted" style="font-size: 12px; margin-top: 2px">
+                {{ recipeCount(it) }} 个 recipe：{{ it.active.spec.recipes.slice(0, 3).join('、') }}{{ recipeCount(it) > 3 ? ' …' : '' }}
               </div>
             </div>
           </template>
@@ -415,7 +310,8 @@ async function doExport() {
         <template v-else>
           <div class="card head">
             <div style="display: flex; align-items: center; gap: 10px">
-              <b style="font-size: 16px" class="mono">{{ selected.feature_id }}/{{ selected.operator }}</b>
+              <b style="font-size: 16px">{{ opName(selected) || selected.operator }}</b>
+              <span class="mono muted" style="font-size: 13px">{{ selected.feature_id }}/{{ selected.operator }}</span>
               <span v-if="base" class="muted" style="font-size: 13px">生效修订 #{{ base.revision }}（v{{ base.version }}，{{ base.reviewed_by }} 于 {{ fmtTime(base.reviewed_at) }} 审核）</span>
               <span v-else class="muted" style="font-size: 13px">尚无生效绑定</span>
             </div>
@@ -437,63 +333,41 @@ async function doExport() {
 
           <!-- ① -->
           <div class="card step">
-            <div class="step-title"><span class="no">1</span>选 fleet 和时间范围 <span class="muted">只用于选腔室和回显，不参与计算</span></div>
-            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
-              <el-select v-model="ed.fleet" placeholder="选择 fleet" clearable style="width: 200px" @change="loadFleetChambers()">
-                <el-option v-for="f in fleets" :key="f" :label="f" :value="f" />
-              </el-select>
-              <el-date-picker v-model="ed.range" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始" end-placeholder="结束" :clearable="false" style="width: 260px" @change="loadFleetChambers()" />
-              <span v-if="ed.fleet" class="muted" style="font-size: 12px">该时间范围内有执行的腔室 {{ ed.fleetChambers.length }} 个，已勾选 {{ ed.fleetChecked.length }} 个</span>
-            </div>
-            <div v-loading="ed.fleetLoading" style="margin-top: 8px">
-              <div v-for="[tool, list] in groupByTool(ed.fleetChambers)" :key="tool" class="tool-row">
-                <el-checkbox v-bind="toolState(ed.fleetChecked, list)" @change="(v) => toggleTool(tool, v)"><b>{{ tool }}</b></el-checkbox>
-                <el-checkbox v-for="c in list" :key="key(c)" :model-value="ed.fleetChecked.includes(key(c))" @change="(v) => toggleFleet(key(c), v)">{{ c.chamber }}</el-checkbox>
-              </div>
-            </div>
-          </div>
-
-          <!-- ② ③ -->
-          <div class="card step">
-            <div class="step-title"><span class="no">2</span>选 recipe <span class="muted">输入关键字自动过滤，点击候选项加入</span></div>
+            <div class="step-title"><span class="no">1</span>选 recipe <span class="muted">输入关键字自动过滤，点击候选项加入；不需要选机台 / 腔室</span></div>
             <el-select v-model="recipePick" filterable remote :remote-method="searchRecipes" :loading="recipeLoading" placeholder="搜索 recipe" style="width: 320px"
               @change="addRecipe" @focus="searchRecipes('')">
               <el-option v-for="r in recipeOptions" :key="r" :label="r" :value="r" :disabled="ed.recipes.some((x) => x.recipe === r)" />
             </el-select>
+            <span v-if="ed.recipes.length" class="muted" style="font-size: 12px; margin-left: 10px">
+              已选 {{ ed.recipes.length }} 个 recipe，GDE 当前覆盖 {{ totalChambers }} 个腔室
+            </span>
 
-            <div class="step-title" style="margin-top: 14px"><span class="no">3</span>勾选机台 / 腔室 <span class="muted">按 recipe 反查跑过它的机台和腔室</span></div>
-            <div v-if="!ed.recipes.length" class="muted" style="font-size: 13px">还没有绑定 recipe</div>
-            <div v-for="(r, i) in ed.recipes" :key="r.recipe" class="recipe-card" :class="{ bad: recipeErrors(i).length }" v-loading="r.loading">
+            <div v-if="!ed.recipes.length" class="muted" style="font-size: 13px; margin-top: 10px">还没有绑定 recipe</div>
+            <div v-for="(r, i) in ed.recipes" :key="r.recipe" class="recipe-card" :class="{ bad: recipeErrors(i).length || r.error }">
               <div style="display: flex; align-items: center; gap: 8px">
                 <b class="mono">{{ r.recipe }}</b>
-                <span class="muted" style="font-size: 12px">已勾选 {{ r.checked.length }} / {{ r.candidates.length }}</span>
+                <span v-if="r.loading" class="muted" style="font-size: 12px">查询腔室…</span>
+                <el-button v-else-if="!r.error" link size="small" @click="r.open = !r.open">
+                  GDE 当前有 {{ toolCount(r) }} 台机台、{{ r.chambers.length }} 个腔室跑过 {{ r.open ? '▲' : '▼' }}
+                </el-button>
                 <span style="flex: 1" />
                 <el-button link type="danger" size="small" @click="removeRecipe(i)">移除</el-button>
               </div>
               <div v-if="r.error" class="err-list" style="list-style: none; padding: 0">{{ r.error }}</div>
-              <div v-for="[tool, list] in groupByTool(inScope(r))" :key="tool" class="tool-row">
-                <el-checkbox v-bind="toolState(r.checked, list)" @change="(v) => setRecipeTool(r, tool, list, v)"><b>{{ tool }}</b></el-checkbox>
-                <el-checkbox v-for="c in list" :key="key(c)" :model-value="r.checked.includes(key(c))" @change="(v) => toggleIn(r, 'checked', key(c), v)">{{ c.chamber }}</el-checkbox>
-              </div>
-              <div v-if="!r.loading && !inScope(r).length && !r.error" class="muted" style="font-size: 12px">fleet 范围内没有跑过该 recipe 的腔室</div>
-              <div v-if="outScope(r).length" style="margin-top: 4px">
-                <el-button link size="small" @click="r.showOut = !r.showOut">
-                  {{ r.showOut ? '收起' : '展开' }}不在 fleet 范围内的 {{ outScope(r).length }} 个腔室
-                </el-button>
-                <div v-show="r.showOut" class="out-scope">
-                  <div v-for="[tool, list] in groupByTool(outScope(r))" :key="tool" class="tool-row">
-                    <b style="font-size: 13px; margin-right: 12px">{{ tool }}</b>
-                    <el-checkbox v-for="c in list" :key="key(c)" :model-value="r.checked.includes(key(c))" @change="(v) => toggleIn(r, 'checked', key(c), v)">{{ c.chamber }}</el-checkbox>
-                  </div>
+              <div v-show="r.open" class="chambers">
+                <div v-for="[tool, list] in groupByTool(r.chambers)" :key="tool" class="tool-row">
+                  <b style="margin-right: 10px">{{ tool }}</b>
+                  <el-tag v-for="c in list" :key="c" size="small" type="info" style="margin: 2px 6px 2px 0">{{ c }}</el-tag>
                 </div>
+                <div class="muted" style="font-size: 12px">仅供参考：以后跑这个 recipe 的新腔室也会自动推送计算</div>
               </div>
               <ErrorList :errors="recipeErrors(i)" />
             </div>
           </div>
 
-          <!-- ④ -->
+          <!-- ② -->
           <div class="card step">
-            <div class="step-title"><span class="no">4</span>算子版本与绑定 JSON</div>
+            <div class="step-title"><span class="no">2</span>算子版本与绑定 JSON</div>
             <div style="display: flex; gap: 8px; align-items: center">
               <span>算子版本</span>
               <el-select v-model="ed.version" style="width: 140px" placeholder="无已发布版本">
@@ -525,10 +399,10 @@ async function doExport() {
               <el-table-column label="修订" width="70"><template #default="{ row }">#{{ row.revision }}</template></el-table-column>
               <el-table-column label="状态" width="90"><template #default="{ row }"><StatusTag kind="revision" :status="row.status" /></template></el-table-column>
               <el-table-column label="版本" width="60"><template #default="{ row }">v{{ row.version }}</template></el-table-column>
-              <el-table-column label="内容" min-width="150">
+              <el-table-column label="recipe" min-width="150">
                 <template #default="{ row }">
                   <span v-if="!row.spec.recipes.length" class="muted">空（解除全部绑定）</span>
-                  <span v-else>{{ row.spec.recipes.map((r) => r.recipe).join('、') }}</span>
+                  <span v-else>{{ row.spec.recipes.join('、') }}</span>
                 </template>
               </el-table-column>
               <el-table-column label="来源" width="70"><template #default="{ row }">{{ SOURCE[row.source] }}</template></el-table-column>
@@ -562,8 +436,8 @@ async function doExport() {
 .split { display: flex; gap: 14px; align-items: flex-start; }
 .left { width: 320px; flex-shrink: 0; padding: 10px; position: sticky; top: 0; }
 .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
-.op-list { max-height: calc(100vh - 230px); overflow: auto; min-height: 120px; }
-.group { font-size: 12px; color: #909399; padding: 8px 6px 4px; font-family: Menlo, Consolas, monospace; }
+.op-list { max-height: calc(100vh - 200px); overflow: auto; min-height: 120px; }
+.group { font-size: 12px; color: #909399; padding: 8px 6px 4px; }
 .op-item { padding: 8px 10px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
 .op-item:hover { background: #f5f7fa; }
 .op-item.on { background: #ecf5ff; border-color: #b3d8ff; }
@@ -572,8 +446,7 @@ async function doExport() {
 .step-title .muted { font-weight: normal; font-size: 12px; }
 .no { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; background: #409eff; color: #fff; font-size: 12px; align-items: center; justify-content: center; }
 .tool-row { display: flex; align-items: center; flex-wrap: wrap; padding: 2px 0; }
-.tool-row :deep(.el-checkbox) { margin-right: 18px; }
 .recipe-card { border: 1px solid #ebeef5; border-radius: 4px; padding: 8px 12px; margin-top: 8px; }
 .recipe-card.bad { border-color: #f56c6c; }
-.out-scope { background: #fafafa; border-radius: 4px; padding: 4px 8px; }
+.chambers { background: #fafafa; border-radius: 4px; padding: 6px 10px; margin-top: 6px; }
 </style>
