@@ -90,11 +90,54 @@ async function submitFeature(f) {
   ElMessage.success('已提交评审')
   load()
 }
+// ---- 删除（自己的草稿或已下线的）：先 dry_run 拿到影响范围，再弹窗警告
+const esc = (t) => String(t ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+const canDelete = (row) => (row.status === 'draft' && mine(row)) || row.status === 'retired'
+function impactHtml(title, im) {
+  const li = []
+  if (im.last_version) li.push('这是该特征的<b>最后一个版本</b>，特征名称一并删除')
+  if (im.operators.length) li.push(`算子版本 ${im.operators.length} 个：<span class="mono">${im.operators.map(esc).join('、')}</span>`)
+  if (im.removed_operators.length) li.push(`整个删除的算子：<span class="mono">${im.removed_operators.map(esc).join('、')}</span>（连同${im.bindings ? ` ${im.bindings} 个绑定修订和` : ''}名称）`)
+  if (im.values) li.push(`<b style="color:#f04461">${im.values}</b> 条历史特征值`)
+  return `<div style="line-height:1.7">将永久删除 <b>${esc(title)}</b>${li.length ? '，以及：' : '。'}
+    ${li.length ? `<ul style="margin:4px 0 8px;padding-left:18px">${li.map((x) => `<li>${x}</li>`).join('')}</ul>` : ''}
+    <div style="color:#f04461;font-weight:600">删除后不可恢复。只是暂时不用的话，下线即可（可随时重新上线）。</div></div>`
+}
+const DANGER = { type: 'error', dangerouslyUseHTMLString: true, confirmButtonText: '确认删除', confirmButtonClass: 'el-button--danger', cancelButtonText: '取消' }
 async function deleteFeature(f) {
-  await ElMessageBox.confirm(`删除草稿 ${f.feature_id}@${f.version}？`, '确认', { type: 'warning' })
+  const im = await features.deleteImpact(f.feature_id, f.version)
+  await ElMessageBox.confirm(impactHtml(`${f.display_name || f.feature_id}（${f.feature_id}@${f.version}）`, im), '删除特征', DANGER)
   await features.remove(f.feature_id, f.version)
   ElMessage.success('已删除')
   load()
+  loadTools()
+}
+
+// ---- 重新上线（已下线 -> 已发布，不再评审）
+const restoreDlg = reactive({ open: false, kind: 'feature', target: null, withOps: true, comment: '', busy: false })
+const opsRetiredWith = (f) =>
+  (opsByFeature.value[f.feature_id] || []).filter((o) => o.status === 'retired' && (o.retire_reason || '').startsWith(`特征 ${f.feature_id}@${f.version} 下线`))
+const hasPublished = (fid) => rows.value.some((x) => x.feature_id === fid && x.status === 'published')
+function openRestore(kind, target) {
+  Object.assign(restoreDlg, { open: true, kind, target, withOps: true, comment: '', busy: false })
+}
+async function doRestore() {
+  const t = restoreDlg.target
+  restoreDlg.busy = true
+  try {
+    const body = { comment: restoreDlg.comment.trim() || null }
+    if (restoreDlg.kind === 'feature') {
+      const r = await features.restore(t.feature_id, t.version, { ...body, operators: restoreDlg.withOps })
+      ElMessage.success(r.operators.length ? `已重新上线，一并上线算子 ${r.operators.length} 个；绑定请到「算子绑定」页重新提交` : '已重新上线')
+    } else {
+      await operators.restore(t.feature_id, t.name, t.version, body)
+      ElMessage.success('已重新上线；绑定请到「算子绑定」页重新提交')
+    }
+    restoreDlg.open = false
+    load()
+  } finally {
+    restoreDlg.busy = false
+  }
 }
 async function retireFeature(f) {
   const { value } = await ElMessageBox.prompt(
@@ -119,7 +162,8 @@ async function submitOp(o) {
   load()
 }
 async function deleteOp(o) {
-  await ElMessageBox.confirm(`删除草稿 ${o.ref}？代码文件一并删除。`, '确认', { type: 'warning' })
+  const im = await operators.deleteImpact(o.feature_id, o.name, o.version)
+  await ElMessageBox.confirm(impactHtml(`${o.display_name || o.name}（${o.ref}，代码文件 ${o.code_file}）`, im), '删除算子', DANGER)
   await operators.remove(o.feature_id, o.name, o.version)
   ElMessage.success('已删除')
   load()
@@ -163,7 +207,7 @@ async function retireOp(o) {
           <div style="padding: 4px 16px 10px 48px">
             <div class="toolbar" style="margin-bottom: 6px">
               <b>{{ row.feature_id }} 的算子</b>
-              <span class="muted" style="font-size: 12px">算子挂在特征下，与特征版本无关；同名算子再次提交自动升版本</span>
+              <span class="muted" style="font-size: 12px">算子挂在特征下，与特征版本无关；新增只填名称，ID 自动生成；点“新版本”提交同一算子的新版本</span>
               <span class="spacer" />
               <el-button size="small" type="primary" plain :disabled="allRetired(row.feature_id)" @click="newOperator(row.feature_id)">新增算子</el-button>
             </div>
@@ -187,7 +231,10 @@ async function retireOp(o) {
                   <el-button v-if="o.status !== 'retired'" link type="primary" @click="openDrawer(o)">试跑</el-button>
                   <el-button link type="primary" @click="newOperator(o.feature_id, o)">新版本</el-button>
                   <el-button v-if="o.status === 'published'" link type="danger" @click="retireOp(o)">下线</el-button>
-                  <el-button v-if="o.status === 'draft' && mine(o)" link type="danger" @click="deleteOp(o)">删除</el-button>
+                  <el-tooltip v-if="o.status === 'retired'" :disabled="hasPublished(o.feature_id)" content="特征没有已发布版本，请先让特征重新上线">
+                    <el-button link type="success" :disabled="!hasPublished(o.feature_id)" @click="openRestore('operator', o)">重新上线</el-button>
+                  </el-tooltip>
+                  <el-button v-if="canDelete(o)" link type="danger" @click="deleteOp(o)">删除</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -238,7 +285,10 @@ async function retireOp(o) {
           <el-button v-if="row.status === 'published'" link type="primary" @click="newOperator(row.feature_id)">新增算子</el-button>
           <el-button link type="primary" @click="newFeature(row)">新版本</el-button>
           <el-button v-if="row.status === 'published'" link type="danger" @click="retireFeature(row)">下线</el-button>
-          <el-button v-if="row.status === 'draft' && mine(row)" link type="danger" @click="deleteFeature(row)">删除</el-button>
+          <el-tooltip v-if="row.status === 'retired'" :disabled="!hasPublished(row.feature_id)" content="该特征已有已发布版本，同一特征只能上线一个版本">
+            <el-button link type="success" :disabled="hasPublished(row.feature_id)" @click="openRestore('feature', row)">重新上线</el-button>
+          </el-tooltip>
+          <el-button v-if="canDelete(row)" link type="danger" @click="deleteFeature(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -250,5 +300,26 @@ async function retireOp(o) {
     <OperatorForm v-model="opForm.open" :feature-id="opForm.featureId" :existing="opsByFeature[opForm.featureId] || []" :base="opForm.base" @created="load" />
     <ReviewDialog v-model="review.open" :kind="review.kind" :target="review.target" @done="load" />
     <OperatorDrawer v-model="drawer.open" :target="drawer.target" />
+
+    <!-- 重新上线 -->
+    <el-dialog v-model="restoreDlg.open" :title="restoreDlg.kind === 'feature' ? '特征重新上线' : '算子重新上线'" width="520px">
+      <template v-if="restoreDlg.target">
+        <p style="margin-top: 0">
+          <b>{{ restoreDlg.target.display_name || restoreDlg.target.feature_id }}</b>
+          <span class="mono muted" style="margin-left: 6px">{{ restoreDlg.kind === 'feature' ? `${restoreDlg.target.feature_id}@${restoreDlg.target.version}` : restoreDlg.target.ref }}</span>
+          将从“已下线”恢复为“已发布”。内容没有变化，不需要重新评审。
+        </p>
+        <div v-if="restoreDlg.target.retire_reason" class="muted" style="font-size: 13px; margin-bottom: 10px">下线原因：{{ restoreDlg.target.retire_reason }}</div>
+        <el-checkbox v-if="restoreDlg.kind === 'feature' && opsRetiredWith(restoreDlg.target).length" v-model="restoreDlg.withOps">
+          随该特征下线的 {{ opsRetiredWith(restoreDlg.target).length }} 个算子一并上线（{{ opsRetiredWith(restoreDlg.target).map((o) => o.display_name || o.name).join('、') }}）
+        </el-checkbox>
+        <el-input v-model="restoreDlg.comment" placeholder="说明（可选），记录在评审记录里" style="margin-top: 10px" />
+        <el-alert type="warning" :closable="false" show-icon style="margin-top: 12px" title="下线时算子已从绑定中移除，上线后不会自动恢复计算：请到「算子绑定」页重新提交绑定" />
+      </template>
+      <template #footer>
+        <el-button @click="restoreDlg.open = false">取消</el-button>
+        <el-button type="success" :loading="restoreDlg.busy" @click="doRestore">重新上线</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

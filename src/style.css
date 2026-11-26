@@ -68,8 +68,9 @@ textarea.code-input:focus { outline: none; border-color: var(--brand); backgroun
 .el-table--border::after, .el-table--border::before, .el-table__inner-wrapper::before { background-color: transparent; }
 .el-table--border .el-table__inner-wrapper::after { background-color: transparent; }
 .el-button { border-radius: 10px; font-weight: 500; }
-.el-button--primary:not(.is-link):not(.is-plain) { background: linear-gradient(135deg, #5b6cff, #7b6bff); border: none; box-shadow: 0 4px 12px rgba(91, 108, 255, 0.28); }
-.el-button--primary:not(.is-link):not(.is-plain):hover { background: linear-gradient(135deg, #6a79ff, #8a7bff); }
+.el-button--primary:not(.is-link):not(.is-plain):not(.el-button--danger) { background: linear-gradient(135deg, #5b6cff, #7b6bff); border: none; box-shadow: 0 4px 12px rgba(91, 108, 255, 0.28); }
+.el-button--primary:not(.is-link):not(.is-plain):not(.el-button--danger):hover { background: linear-gradient(135deg, #6a79ff, #8a7bff); }
+.el-button--danger:not(.is-link):not(.is-plain) { background: #f04461; border-color: #f04461; color: #fff; box-shadow: 0 4px 12px rgba(240, 68, 97, 0.28); }
 .el-tag { border-radius: 99px; }
 .el-dialog { border-radius: 20px; padding: 22px 24px; }
 .el-drawer { border-radius: 20px 0 0 20px; }

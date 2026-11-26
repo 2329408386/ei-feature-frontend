@@ -16,7 +16,11 @@ export const features = {
   updateMeta: (id, body) => patch(`/features/${enc(id)}`, body),
   detail: (id, v) => get(fpath(id, v)),
   create: (spec, opts) => post('/features', spec, opts),
+  // 删除：自己的草稿或已下线的；deleteImpact 先看影响范围（弹窗警告用）
   remove: (id, v) => del(fpath(id, v)),
+  deleteImpact: (id, v) => request('DELETE', fpath(id, v), { params: { dry_run: true } }),
+  // 重新上线（不再评审）；operators：随该特征下线的算子一并上线
+  restore: (id, v, body) => post(`${fpath(id, v)}/restore`, body),
   submit: (id, v) => post(`${fpath(id, v)}/submit`),
   review: (id, v, body) => post(`${fpath(id, v)}/review`, body),
   retire: (id, v, reason) => post(`${fpath(id, v)}/retire`, { reason }),
@@ -29,6 +33,8 @@ export const operators = {
   detail: (fid, name, v) => get(opath(fid, name, v)),
   create: (body, opts) => post('/operators', body, opts),
   remove: (fid, name, v) => del(opath(fid, name, v)),
+  deleteImpact: (fid, name, v) => request('DELETE', opath(fid, name, v), { params: { dry_run: true } }),
+  restore: (fid, name, v, body) => post(`${opath(fid, name, v)}/restore`, body),
   submit: (fid, name, v) => post(`${opath(fid, name, v)}/submit`),
   review: (fid, name, v, body) => post(`${opath(fid, name, v)}/review`, body),
   retire: (fid, name, v, reason) => post(`${opath(fid, name, v)}/retire`, { reason }),
